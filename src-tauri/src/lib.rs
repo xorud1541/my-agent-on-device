@@ -1,9 +1,9 @@
-mod agent;
+pub mod agent;
 mod commands;
-mod config;
-mod llm;
-mod models;
-mod tools;
+pub mod config;
+pub mod llm;
+pub mod models;
+pub mod tools;
 
 use config::AppConfig;
 use llm::server::LlamaServer;

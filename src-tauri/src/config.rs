@@ -51,8 +51,8 @@ fn default_model_path() -> String {
     home.join(".lmstudio")
         .join("models")
         .join("lmstudio-community")
-        .join("Qwen3.5-4B-GGUF")
-        .join("Qwen3.5-4B-Q4_K_M.gguf")
+        .join("Qwen3.5-2B-GGUF")
+        .join("Qwen3.5-2B-Q4_K_M.gguf")
         .to_string_lossy()
         .into_owned()
 }
