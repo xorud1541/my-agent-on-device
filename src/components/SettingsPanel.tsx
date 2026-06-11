@@ -80,7 +80,7 @@ export function SettingsPanel({ onClose }: Props) {
           onChange={(e) => setConfig({ ...config, max_output_tokens: Number(e.target.value) })}
         />
 
-        <label>사고(thinking) 토큰 예산 (-1 무제한, 0 끔)</label>
+        <label>사고(thinking) 토큰 예산 (0 끔=기본, N 예산, -1 무제한)</label>
         <input
           type="number"
           value={config.reasoning_budget}

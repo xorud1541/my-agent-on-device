@@ -22,8 +22,8 @@ pub struct AppConfig {
     pub temperature: f32,
     /// LLM 호출당 출력 토큰 상한 (레이턴시 예산: ~20 t/s 기준 1024 ≈ 50초)
     pub max_output_tokens: u32,
-    /// 사고(thinking) 토큰 예산. -1 무제한, 0 사고 끔.
-    /// 무제한이면 사고가 max_output_tokens 를 전부 소진해 빈 응답이 나올 수 있다.
+    /// 사고(thinking) 토큰 예산. 0 = 사고 끔(기본), N>0 = 예산, -1 = 무제한.
+    /// 사고를 켜면 호출당 +10초 이상 느려지고, 예산 강제 종료 시 빈 응답이 날 수 있다.
     pub reasoning_budget: i32,
 }
 
@@ -41,7 +41,7 @@ impl Default for AppConfig {
             // 툴콜 인자 JSON 안정성 우선 (높을수록 무이스케이프 경로 등 미스생성 증가)
             temperature: 0.4,
             max_output_tokens: 1024,
-            reasoning_budget: 256,
+            reasoning_budget: 0,
         }
     }
 }

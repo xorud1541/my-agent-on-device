@@ -35,11 +35,19 @@ impl LlamaServer {
             "-c", &cfg.ctx_size.to_string(),
             "--jinja",
             "--no-webui",
-            "--reasoning-budget", &cfg.reasoning_budget.to_string(),
-            // 예산 강제 종료 직후 모델이 EOS 로 끝내버리지 않도록 본문/행동으로 유도
-            "--reasoning-budget-message",
-            "생각할 시간이 끝났다. 지금 바로 도구를 호출하거나 한국어로 최종 답변한다.",
         ]);
+        if cfg.reasoning_budget == 0 {
+            // 사고 비활성화: 강제 사고 종료 후 즉시 EOS 가 나오는 불안정 경로 자체를 제거.
+            // Qwen3.5-2B 기준 사고 없이도 한국어 툴콜 5/5, 호출당 1~5초 (bench 참고)
+            cmd.args(["--reasoning", "off"]);
+        } else {
+            cmd.args(["--reasoning-budget", &cfg.reasoning_budget.to_string()]);
+            // 예산 강제 종료 직후 모델이 EOS 로 끝내버리지 않도록 본문/행동으로 유도
+            cmd.args([
+                "--reasoning-budget-message",
+                "생각할 시간이 끝났다. 지금 바로 도구를 호출하거나 한국어로 최종 답변한다.",
+            ]);
+        }
         #[cfg(windows)]
         {
             // 릴리즈 빌드에서 콘솔 창이 뜨지 않도록
