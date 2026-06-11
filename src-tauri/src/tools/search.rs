@@ -1,4 +1,4 @@
-use super::{opt_bool, opt_u64, req_str, Tool};
+use super::{opt_bool, opt_u64, req_str, Tool, ToolCtx};
 use anyhow::Result;
 use globset::GlobBuilder;
 use serde_json::{json, Value};
@@ -34,7 +34,7 @@ impl Tool for SearchFiles {
             "required": ["root", "pattern"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
         let root = req_str(args, "root")?;
         let pattern = req_str(args, "pattern")?;
         let images_only = opt_bool(args, "images_only").unwrap_or(false);
@@ -141,7 +141,10 @@ mod tests {
     fn glob_matches_recursively_case_insensitive() {
         let dir = setup();
         let out = SearchFiles
-            .execute(&json!({"root": dir.path().to_string_lossy(), "pattern": "*.png"}))
+            .execute(
+                &json!({"root": dir.path().to_string_lossy(), "pattern": "*.png"}),
+                &crate::tools::test_support::ctx_with_workspace(dir.path()),
+            )
             .unwrap();
         assert!(out.contains("photo.png"));
         assert!(out.contains("screenshot.PNG"));
@@ -152,7 +155,10 @@ mod tests {
     fn substring_pattern_works() {
         let dir = setup();
         let out = SearchFiles
-            .execute(&json!({"root": dir.path().to_string_lossy(), "pattern": "report"}))
+            .execute(
+                &json!({"root": dir.path().to_string_lossy(), "pattern": "report"}),
+                &crate::tools::test_support::ctx_with_workspace(dir.path()),
+            )
             .unwrap();
         assert!(out.contains("report.docx"));
     }
@@ -163,6 +169,7 @@ mod tests {
         let out = SearchFiles
             .execute(
                 &json!({"root": dir.path().to_string_lossy(), "pattern": "*", "images_only": true}),
+                &crate::tools::test_support::ctx_with_workspace(dir.path()),
             )
             .unwrap();
         assert!(out.contains("photo.png"));

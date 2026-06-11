@@ -16,7 +16,8 @@ use tauri::Manager;
 use tools::ToolRegistry;
 
 pub struct AppState {
-    pub config: Mutex<AppConfig>,
+    /// Arc — 도구 실행 컨텍스트(ToolCtx)와 살아있는 설정을 공유한다
+    pub config: Arc<Mutex<AppConfig>>,
     pub server: tokio::sync::Mutex<LlamaServer>,
     pub sessions: Mutex<HashMap<String, Vec<ChatMessage>>>,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -27,7 +28,7 @@ pub struct AppState {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
-            config: Mutex::new(AppConfig::load()),
+            config: Arc::new(Mutex::new(AppConfig::load())),
             server: tokio::sync::Mutex::new(LlamaServer::new()),
             sessions: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
@@ -50,6 +51,7 @@ pub fn run() {
             commands::new_session,
             commands::send_message,
             commands::cancel_turn,
+            commands::pick_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

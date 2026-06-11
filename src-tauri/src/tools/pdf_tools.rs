@@ -1,4 +1,4 @@
-use super::{opt_u64, req_str, Tool};
+use super::{opt_u64, req_str, Tool, ToolCtx};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
@@ -23,7 +23,7 @@ impl Tool for PdfExtractText {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
         let max_chars = opt_u64(args, "max_chars").unwrap_or(DEFAULT_MAX_CHARS) as usize;
         let text = pdf_extract::extract_text(path)

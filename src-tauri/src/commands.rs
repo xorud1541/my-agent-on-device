@@ -36,14 +36,30 @@ pub async fn set_config(app: AppHandle, new_config: AppConfig) -> Result<(), Str
             || cfg.n_gpu_layers != new_config.n_gpu_layers
             || cfg.ctx_size != new_config.ctx_size
             || cfg.reasoning_budget != new_config.reasoning_budget;
-        *cfg = new_config;
+        *cfg = new_config.clone();
         cfg.save().map_err(|e| e.to_string())?;
         changed
     };
+    // UI ↔ 에이전트 루프 동기화: 어디서 바뀌었든 같은 이벤트가 흐른다
+    emit_event(&app, AgentEvent::ConfigChanged { config: new_config });
     if restart_needed {
         start_server_inner(&app).await?;
     }
     Ok(())
+}
+
+/// 네이티브 폴더 선택 다이얼로그. 취소 시 None.
+#[tauri::command]
+pub async fn pick_folder(initial_dir: Option<String>) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("워크스페이스 폴더 선택");
+        if let Some(dir) = initial_dir.filter(|d| std::path::Path::new(d).is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_folder().map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// ~/.lmstudio/models 아래의 GGUF 목록 (mmproj 프로젝터 파일 제외)
@@ -108,11 +124,12 @@ pub async fn restart_server(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn new_session(state: State<'_, AppState>) -> String {
     let id = uuid::Uuid::new_v4().to_string();
+    let prompt = agent::system_prompt(&state.config.lock().unwrap());
     state
         .sessions
         .lock()
         .unwrap()
-        .insert(id.clone(), vec![ChatMessage::system(agent::system_prompt())]);
+        .insert(id.clone(), vec![ChatMessage::system(prompt)]);
     id
 }
 
@@ -136,6 +153,12 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
         history.push(ChatMessage::user(text));
         history.clone()
     };
+    // 워크스페이스/페르소나/시각이 살아있도록 시스템 프롬프트를 매 턴 재생성
+    if let Some(first) = messages.first_mut() {
+        if first.role == "system" {
+            *first = ChatMessage::system(agent::system_prompt(&state.config.lock().unwrap()));
+        }
+    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancels.lock().unwrap().insert(session_id.clone(), cancel.clone());
@@ -165,10 +188,20 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
             emit_event(&app3, ev);
         };
 
+        // 도구가 설정을 바꾸면(set_workspace/update_profile) 저장하고 UI 로 방송한다
+        let config = app2.state::<AppState>().config.clone();
+        let notify_app = app2.clone();
+        let tool_ctx = crate::tools::ToolCtx::new(
+            config,
+            Arc::new(|cfg: &AppConfig| cfg.save()),
+            Arc::new(move |ev| emit_event(&notify_app, ev)),
+        );
+
         let pre_len = messages.len() - 1; // 이번 턴 user 메시지부터 로그에 포함
         let started = std::time::Instant::now();
         let run = agent::run_turn(
-            &client, &registry, &mut messages, &sid, max_rounds, temperature, &cancel, &emit,
+            &client, &registry, &tool_ctx, &mut messages, &sid, max_rounds, temperature, &cancel,
+            &emit,
         )
         .await;
 

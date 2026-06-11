@@ -6,7 +6,8 @@ export type AgentEvent =
   | { type: "tool-call-end"; session_id: string; call_id: string; name: string; ok: boolean; result: string }
   | { type: "turn-end"; session_id: string; elapsed_ms: number }
   | { type: "error"; session_id: string; message: string }
-  | { type: "server-status"; status: "loading" | "ready" | "down"; detail: string };
+  | { type: "server-status"; status: "loading" | "ready" | "down"; detail: string }
+  | { type: "config-changed"; config: AppConfig };
 
 // 어시스턴트 턴은 발생 순서대로 쌓이는 세그먼트의 나열이다
 export type Segment =
@@ -53,6 +54,10 @@ export interface AppConfig {
   temperature: number;
   max_output_tokens: number;
   reasoning_budget: number;
+  workspace_dir: string;
+  user_name: string;
+  agent_name: string;
+  removebg_model: string;
 }
 
 export type ServerStatus = { status: "loading" | "ready" | "down"; detail: string };

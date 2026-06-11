@@ -1,4 +1,5 @@
-use super::{opt_bool, req_str, Tool};
+use super::{opt_bool, req_str, Tool, ToolCtx};
+use crate::tools::workspace::ensure_in_workspace;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::fs;
@@ -26,7 +27,7 @@ impl Tool for ListDir {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
         let mut lines = Vec::new();
         let mut total = 0usize;
@@ -78,7 +79,7 @@ impl Tool for ReadFile {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
         let meta = fs::metadata(path).with_context(|| format!("파일 없음: {path}"))?;
         let bytes = fs::read(path)?;
@@ -115,10 +116,11 @@ impl Tool for WriteFile {
             "required": ["path", "content"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
         let content = req_str(args, "content")?;
         let overwrite = opt_bool(args, "overwrite").unwrap_or(false);
+        ensure_in_workspace(path, &ctx.workspace())?;
         if Path::new(path).exists() && !overwrite {
             bail!("파일이 이미 존재함: {path}. 덮어쓰려면 overwrite=true 로 다시 호출.");
         }
@@ -149,9 +151,12 @@ impl Tool for MovePath {
             "required": ["from", "to"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let from = req_str(args, "from")?;
         let to = req_str(args, "to")?;
+        // 이동은 원본 삭제를 수반하므로 양쪽 모두 워크스페이스 안이어야 한다
+        ensure_in_workspace(from, &ctx.workspace())?;
+        ensure_in_workspace(to, &ctx.workspace())?;
         if Path::new(to).exists() {
             bail!("대상이 이미 존재함: {to}");
         }
@@ -182,9 +187,11 @@ impl Tool for CopyPath {
             "required": ["from", "to"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let from = req_str(args, "from")?;
         let to = req_str(args, "to")?;
+        // 복사는 원본을 건드리지 않으므로 대상만 워크스페이스 안이면 된다
+        ensure_in_workspace(to, &ctx.workspace())?;
         if Path::new(to).exists() {
             bail!("대상이 이미 존재함: {to}");
         }
@@ -214,8 +221,9 @@ impl Tool for DeletePath {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
+        ensure_in_workspace(path, &ctx.workspace())?;
         if !Path::new(path).exists() {
             bail!("경로 없음: {path}");
         }
@@ -233,44 +241,48 @@ pub(crate) fn fmt_time(t: std::time::SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::ctx_with_workspace;
     use tempfile::tempdir;
 
     #[test]
     fn write_then_read_roundtrip() {
         let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
         let path = dir.path().join("a.txt");
         let p = path.to_string_lossy().to_string();
 
         let out = WriteFile
-            .execute(&json!({"path": p, "content": "안녕"}))
+            .execute(&json!({"path": p, "content": "안녕"}), &ctx)
             .unwrap();
         assert!(out.contains("저장 완료"));
 
-        let text = ReadFile.execute(&json!({"path": p})).unwrap();
+        let text = ReadFile.execute(&json!({"path": p}), &ctx).unwrap();
         assert_eq!(text, "안녕");
     }
 
     #[test]
     fn write_refuses_overwrite_without_flag() {
         let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
         let p = dir.path().join("a.txt").to_string_lossy().to_string();
         WriteFile
-            .execute(&json!({"path": p, "content": "1"}))
+            .execute(&json!({"path": p, "content": "1"}), &ctx)
             .unwrap();
         assert!(WriteFile
-            .execute(&json!({"path": p, "content": "2"}))
+            .execute(&json!({"path": p, "content": "2"}), &ctx)
             .is_err());
         WriteFile
-            .execute(&json!({"path": p, "content": "2", "overwrite": true}))
+            .execute(&json!({"path": p, "content": "2", "overwrite": true}), &ctx)
             .unwrap();
     }
 
     #[test]
     fn list_dir_shows_entries() {
         let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
         std::fs::write(dir.path().join("x.txt"), "x").unwrap();
         let out = ListDir
-            .execute(&json!({"path": dir.path().to_string_lossy()}))
+            .execute(&json!({"path": dir.path().to_string_lossy()}), &ctx)
             .unwrap();
         assert!(out.contains("x.txt"));
     }
@@ -278,13 +290,45 @@ mod tests {
     #[test]
     fn move_and_copy() {
         let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
         let a = dir.path().join("a.txt").to_string_lossy().to_string();
         let b = dir.path().join("b.txt").to_string_lossy().to_string();
         let c = dir.path().join("c.txt").to_string_lossy().to_string();
         std::fs::write(&a, "데이터").unwrap();
-        CopyPath.execute(&json!({"from": a, "to": b})).unwrap();
-        MovePath.execute(&json!({"from": b, "to": c})).unwrap();
+        CopyPath
+            .execute(&json!({"from": a, "to": b}), &ctx)
+            .unwrap();
+        MovePath
+            .execute(&json!({"from": b, "to": c}), &ctx)
+            .unwrap();
         assert!(std::path::Path::new(&c).exists());
         assert!(!std::path::Path::new(&b).exists());
+    }
+
+    #[test]
+    fn write_outside_workspace_rejected() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        let ctx = ctx_with_workspace(&ws);
+        let outside = dir.path().join("밖.txt").to_string_lossy().to_string();
+        let err = WriteFile
+            .execute(&json!({"path": outside, "content": "x"}), &ctx)
+            .unwrap_err();
+        assert!(err.to_string().contains("워크스페이스 밖"), "{err}");
+    }
+
+    #[test]
+    fn read_outside_workspace_allowed() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        let ctx = ctx_with_workspace(&ws);
+        let outside = dir.path().join("읽기.txt");
+        std::fs::write(&outside, "읽힘").unwrap();
+        let out = ReadFile
+            .execute(&json!({"path": outside.to_string_lossy()}), &ctx)
+            .unwrap();
+        assert_eq!(out, "읽힘");
     }
 }

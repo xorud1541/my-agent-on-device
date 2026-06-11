@@ -50,6 +50,20 @@
 - **원인**: 백엔드 ready 이벤트가 React 리스너 등록 전에 발행되는 레이스
 - **수정**: `useAgent.ts` — ready 아닌 동안 2초마다 `server_status` 폴링 보정
 
+### 8. "배경제거 해줘" → 회전/리사이즈 수행 (2026-06-11, 2차 스펙)
+- **증상**: `remove_background` 대신 `image_transform`(rotate/resize) 호출, 또는 `image_info`만 하고 종료
+- **원인**: Qwen3.5-2B 가 '배경제거/누끼' 복합명사를 도구 설명("배경을 제거해")과 매칭 못 함.
+  라이브 서버 replay 실험 결과 — 설명 키워드 보강(단독으론 부분효과), 시스템 프롬프트 힌트,
+  few-shot, 사용자 메시지에 도구명 직접 명시, `tool_choice` 강제(b9334 미지원) **전부 실패**.
+  유일하게 결정적으로 동작한 것은 경쟁 도구를 목록에서 제거하는 것 (alian tool_domain 패턴).
+- **수정**: ① `remove_background` 설명을 "배경제거(누끼따기) 전용 도구"로 시작
+  ② `agent::tools_to_exclude` — 발화에 배경제거 키워드가 있으면 그 턴 동안 `image_transform` 을
+  스키마에서 제외 (`ToolRegistry::schemas_excluding`)
+- **검증**: `cargo run --example live_bg_test` (실행 중인 8736 서버에 실제 루프 구동).
+  경로를 아는 상태에선 remove_background 직행 확인.
+- **잔존 리스크**: 파일명만 말하고 경로가 대화에 없으면 워크스페이스가 아닌 홈 폴더부터 검색하는
+  경향 (프롬프트 규칙 3에 보강했으나 2B 한계). 실사용은 직전 턴에 파일 목록이 있어 영향 적음.
+
 ## 개발 환경 함정 (이 PC 특유)
 
 - 회사망 SSL: cargo는 `~/.cargo/config.toml`의 `check-revoke=false`, curl은 `--ssl-no-revoke`

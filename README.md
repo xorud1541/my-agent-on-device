@@ -35,8 +35,10 @@ React (채팅 UI) ── invoke/listen ── Rust (Tauri)
                                       ├─ llm/        llama-server 사이드카 + SSE 스트리밍 클라이언트
                                       ├─ tools/      list_dir, read/write_file, move/copy/delete,
                                       │              search_files, image_info/transform,
+                                      │              remove_background(ONNX), images_to_pdf,
                                       │              pdf_extract_text, screen_capture,
-                                      │              zip_create/zip_extract
+                                      │              zip_create/zip_extract,
+                                      │              set_workspace, update_profile
                                       └─ commands.rs IPC 커맨드 + 세션 관리
                                             │ HTTP (OpenAI 호환, localhost)
                                             ▼
@@ -44,8 +46,18 @@ React (채팅 UI) ── invoke/listen ── Rust (Tauri)
 ```
 
 - 이벤트 채널 `agent-event` 하나로 `thinking-delta / text-delta / tool-call-start /
-  tool-call-end / turn-end / error / server-status` 를 스트리밍한다.
+  tool-call-end / turn-end / error / server-status / config-changed` 를 스트리밍한다.
 - 대화 로그: `%APPDATA%\com.estsoft.local-agent\logs\chat_YYYYMMDD.jsonl` (+ llama-server.log)
+
+### 2차 스펙 기능
+- **워크스페이스**: 파일 생성/수정/삭제는 설정된 워크스페이스 안으로 제한 (읽기/검색은 전체 허용).
+  헤더 칩/설정 패널에서 변경, 에이전트도 `set_workspace` 로 변경 가능 — 양쪽 모두
+  `config-changed` 이벤트로 실시간 동기화되고 시스템 프롬프트는 매 턴 재생성된다.
+- **배경제거**: `remove_background` 도구. `~/.alice/models/removeBG.ort` (ONNX Runtime,
+  Windows 는 load-dynamic — `src-tauri/vendor/onnxruntime/onnxruntime.dll` 사용, 빌드 시 번들).
+- **이미지 → PDF**: `images_to_pdf` 도구 (JPEG 무손실 passthrough, EXIF/알파 보정, A4/Letter/Fit).
+- **페르소나**: 이름(user_name/agent_name)이 비어 있으면 대화 초반에 서로 이름을 묻고
+  `update_profile` 로 영속화. 설정 패널에서도 수정 가능.
 
 ## 문서
 

@@ -33,6 +33,14 @@ export function SettingsPanel({ onClose }: Props) {
     }
   };
 
+  const pickWorkspace = async () => {
+    if (!config) return;
+    const picked = await invoke<string | null>("pick_folder", {
+      initialDir: config.workspace_dir,
+    });
+    if (picked) setConfig({ ...config, workspace_dir: picked });
+  };
+
   if (!config) return null;
 
   return (
@@ -40,6 +48,29 @@ export function SettingsPanel({ onClose }: Props) {
       <div className="settings-backdrop" onClick={onClose} />
       <aside className="settings">
         <h2>SETTINGS</h2>
+
+        <label>워크스페이스 (파일 생성/수정은 이 폴더 안에서만)</label>
+        <div className="ws-row">
+          <input
+            value={config.workspace_dir}
+            onChange={(e) => setConfig({ ...config, workspace_dir: e.target.value })}
+          />
+          <button className="btn-ghost" onClick={pickWorkspace}>
+            폴더 선택
+          </button>
+        </div>
+
+        <label>에이전트 이름 (비우면 대화에서 지어달라고 함)</label>
+        <input
+          value={config.agent_name}
+          onChange={(e) => setConfig({ ...config, agent_name: e.target.value })}
+        />
+
+        <label>사용자 이름 (비우면 대화에서 물어봄)</label>
+        <input
+          value={config.user_name}
+          onChange={(e) => setConfig({ ...config, user_name: e.target.value })}
+        />
 
         <label>모델 (~/.lmstudio/models)</label>
         <select

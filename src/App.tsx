@@ -7,12 +7,18 @@ import { useAgent } from "./hooks/useAgent";
 const SUGGESTIONS = [
   "다운로드 폴더에서 PDF 파일 찾아줘",
   "지금 화면 캡처해줘",
-  "바탕화면 이미지 목록 보여줘",
-  "사진 폴더에서 가장 최근 이미지를 흑백으로 바꿔줘",
+  "워크스페이스의 사진 배경을 제거해줘",
+  "워크스페이스 이미지들을 PDF 한 권으로 묶어줘",
 ];
 
+/** 경로 마지막 폴더명 (헤더 칩 표시용) */
+function lastSegment(p: string) {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+
 function App() {
-  const { messages, busy, server, send, cancel, newChat } = useAgent();
+  const { messages, busy, server, config, send, cancel, newChat } = useAgent();
   const [showSettings, setShowSettings] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -33,12 +39,27 @@ function App() {
     <div className="app">
       <header className="header">
         <span className="wordmark">
-          LOCAL<em>·</em>AGENT
+          {config?.agent_name ? (
+            config.agent_name
+          ) : (
+            <>
+              LOCAL<em>·</em>AGENT
+            </>
+          )}
         </span>
         <span className="led-status" title={server.detail}>
           <span className={`led ${server.status}`} />
           {statusLabel}
         </span>
+        {config && (
+          <button
+            className="ws-chip"
+            title={`워크스페이스: ${config.workspace_dir}\n(클릭해서 변경)`}
+            onClick={() => setShowSettings(true)}
+          >
+            📁 {lastSegment(config.workspace_dir)}
+          </button>
+        )}
         <div className="header-actions">
           <button className="icon-btn" onClick={newChat}>
             + 새 대화

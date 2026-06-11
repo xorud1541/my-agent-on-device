@@ -30,6 +30,9 @@ cd src-tauri && cargo test --test e2e_agent --release -- --ignored --nocapture -
 ## 규칙
 - Tauri 커맨드는 `src-tauri/src/commands.rs`에 정의, 프론트↔백 통신은 `invoke()` + `agent-event` 리슨
 - 백엔드 이벤트(AgentEvent)와 `src/types.ts` 타입은 항상 동기화할 것 (serde kebab-case tag)
-- 도구 추가 시: `tools/` 에 Tool trait 구현 + `ToolRegistry::with_default_tools` 등록 + 단위 테스트
+- 도구 추가 시: `tools/` 에 Tool trait 구현(`execute(args, ctx: &ToolCtx)`) + `ToolRegistry::with_default_tools` 등록 + 단위 테스트
+- 쓰기성 도구(파일 생성/수정/삭제/출력 저장)는 반드시 `workspace::ensure_in_workspace` 가드를 거칠 것
+- 설정을 바꾸는 도구는 `ctx.update_config()` 사용 (저장 + config-changed 방송이 한 번에 됨)
 - 파괴적 도구는 금지 — 삭제는 반드시 휴지통(trash crate) 경유
+- ONNX 도구는 ort load-dynamic — `vendor/onnxruntime/onnxruntime.dll` 필요 (`ensure_ort_dylib` 가 경로 설정)
 - 스킬을 추가/삭제/이름변경할 때 README.md도 같이 업데이트할 것

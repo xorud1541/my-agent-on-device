@@ -1,4 +1,5 @@
-use super::{opt_str, req_str, Tool};
+use super::{opt_str, req_str, Tool, ToolCtx};
+use crate::tools::workspace::ensure_in_workspace;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::fs::File;
@@ -25,7 +26,7 @@ impl Tool for ZipCreate {
             "required": ["paths"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let paths: Vec<PathBuf> = req_str(args, "paths")?
             .split(',')
             .map(|s| PathBuf::from(s.trim()))
@@ -51,6 +52,7 @@ impl Tool for ZipCreate {
                 first.with_file_name(format!("{stem}.zip"))
             }
         };
+        ensure_in_workspace(&out_path.to_string_lossy(), &ctx.workspace())?;
         if out_path.exists() {
             bail!(
                 "대상이 이미 존재함: {} (다른 output_path 지정)",
@@ -136,7 +138,7 @@ impl Tool for ZipExtract {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
         let file = File::open(path).with_context(|| format!("파일 없음: {path}"))?;
         let mut archive = zip::ZipArchive::new(file).context("zip 형식 아님")?;
@@ -173,6 +175,7 @@ impl Tool for ZipExtract {
                 p.with_file_name(stem)
             }
         };
+        ensure_in_workspace(&out_dir.to_string_lossy(), &ctx.workspace())?;
         std::fs::create_dir_all(&out_dir)?;
 
         let mut count = 0usize;
@@ -226,11 +229,13 @@ fn decode_name(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::ctx_with_workspace;
     use tempfile::tempdir;
 
     #[test]
     fn zip_roundtrip_with_korean_names() {
         let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
         let src = dir.path().join("보고서");
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("요약.txt"), "내용입니다").unwrap();
@@ -238,20 +243,23 @@ mod tests {
         std::fs::write(src.join("하위").join("자료.md"), "# 자료").unwrap();
 
         let out = ZipCreate
-            .execute(&json!({"paths": src.to_string_lossy()}))
+            .execute(&json!({"paths": src.to_string_lossy()}), &ctx)
             .unwrap();
         assert!(out.contains("파일 2개"), "{out}");
         let zip_path = dir.path().join("보고서.zip");
         assert!(zip_path.exists());
 
         let listed = ZipExtract
-            .execute(&json!({"path": zip_path.to_string_lossy(), "list_only": true}))
+            .execute(
+                &json!({"path": zip_path.to_string_lossy(), "list_only": true}),
+                &ctx,
+            )
             .unwrap();
         assert!(listed.contains("요약.txt"), "{listed}");
 
         let extract_to = dir.path().join("풀기");
         ZipExtract
-            .execute(&json!({"path": zip_path.to_string_lossy(), "output_dir": extract_to.to_string_lossy()}))
+            .execute(&json!({"path": zip_path.to_string_lossy(), "output_dir": extract_to.to_string_lossy()}), &ctx)
             .unwrap();
         let text = std::fs::read_to_string(extract_to.join("보고서").join("요약.txt")).unwrap();
         assert_eq!(text, "내용입니다");
@@ -265,6 +273,7 @@ mod tests {
     #[test]
     fn zip_multiple_files_via_comma() {
         let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
         let a = dir.path().join("a.txt");
         let b = dir.path().join("b.txt");
         std::fs::write(&a, "A").unwrap();
@@ -272,10 +281,13 @@ mod tests {
         let out_zip = dir.path().join("두개.zip");
 
         let out = ZipCreate
-            .execute(&json!({
-                "paths": format!("{}, {}", a.to_string_lossy(), b.to_string_lossy()),
-                "output_path": out_zip.to_string_lossy()
-            }))
+            .execute(
+                &json!({
+                    "paths": format!("{}, {}", a.to_string_lossy(), b.to_string_lossy()),
+                    "output_path": out_zip.to_string_lossy()
+                }),
+                &ctx,
+            )
             .unwrap();
         assert!(out.contains("파일 2개"), "{out}");
     }
@@ -283,6 +295,7 @@ mod tests {
     #[test]
     fn extract_blocks_zip_slip() {
         let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
         let zip_path = dir.path().join("evil.zip");
         {
             let mut zw = zip::ZipWriter::new(File::create(&zip_path).unwrap());
@@ -293,7 +306,7 @@ mod tests {
         }
         let extract_to = dir.path().join("out");
         ZipExtract
-            .execute(&json!({"path": zip_path.to_string_lossy(), "output_dir": extract_to.to_string_lossy()}))
+            .execute(&json!({"path": zip_path.to_string_lossy(), "output_dir": extract_to.to_string_lossy()}), &ctx)
             .unwrap();
         assert!(
             !dir.path().join("escape.txt").exists(),

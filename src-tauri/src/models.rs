@@ -109,6 +109,11 @@ pub enum AgentEvent {
         status: String,
         detail: String,
     },
+    /// 설정 변경 방송 (워크스페이스/페르소나 등). UI ↔ 에이전트 루프 실시간 동기화용 —
+    /// 설정 패널 저장이든 도구(set_workspace/update_profile) 호출이든 같은 이벤트가 흐른다.
+    ConfigChanged {
+        config: crate::config::AppConfig,
+    },
 }
 
 /// LLM 한 번 호출의 누적 결과

@@ -1,4 +1,5 @@
-use super::{opt_str, opt_u64, req_str, Tool};
+use super::{opt_str, opt_u64, req_str, Tool, ToolCtx};
+use crate::tools::workspace::ensure_in_workspace;
 use anyhow::{bail, Context, Result};
 use image::ImageFormat;
 use serde_json::{json, Value};
@@ -22,7 +23,7 @@ impl Tool for ImageInfo {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
         let meta = std::fs::metadata(path).with_context(|| format!("파일 없음: {path}"))?;
         let img = image::image_dimensions(path).with_context(|| format!("이미지 아님: {path}"))?;
@@ -62,9 +63,10 @@ impl Tool for ImageTransform {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
-        let mut img = image::open(path).with_context(|| format!("이미지 열기 실패: {path}"))?;
+        // content-sniffing — 확장자와 내용이 다른 파일도 연다
+        let mut img = super::image_ai::open_image_sniffed(Path::new(path))?;
         let (ow, oh) = (img.width(), img.height());
         let mut ops = Vec::new();
 
@@ -109,6 +111,7 @@ impl Tool for ImageTransform {
 
         let format = opt_str(args, "format");
         let out_path = resolve_output_path(path, opt_str(args, "output_path"), format)?;
+        ensure_in_workspace(&out_path.to_string_lossy(), &ctx.workspace())?;
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -151,6 +154,7 @@ fn resolve_output_path(input: &str, output: Option<&str>, format: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::test_support::ctx_with_workspace;
     use tempfile::tempdir;
 
     fn make_png(dir: &Path, name: &str, w: u32, h: u32) -> String {
@@ -164,7 +168,9 @@ mod tests {
     fn info_reports_dimensions() {
         let dir = tempdir().unwrap();
         let p = make_png(dir.path(), "a.png", 32, 16);
-        let out = ImageInfo.execute(&json!({"path": p})).unwrap();
+        let out = ImageInfo
+            .execute(&json!({"path": p}), &ctx_with_workspace(dir.path()))
+            .unwrap();
         assert!(out.contains("32x16"));
     }
 
@@ -173,7 +179,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let p = make_png(dir.path(), "a.png", 100, 50);
         let out = ImageTransform
-            .execute(&json!({"path": p, "resize_width": 40}))
+            .execute(
+                &json!({"path": p, "resize_width": 40}),
+                &ctx_with_workspace(dir.path()),
+            )
             .unwrap();
         assert!(out.contains("40x20"), "{out}");
         assert!(dir.path().join("a_edited.png").exists());
@@ -184,7 +193,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let p = make_png(dir.path(), "a.png", 10, 10);
         let out = ImageTransform
-            .execute(&json!({"path": p, "format": "jpeg"}))
+            .execute(
+                &json!({"path": p, "format": "jpeg"}),
+                &ctx_with_workspace(dir.path()),
+            )
             .unwrap();
         assert!(out.contains("a_edited.jpeg"), "{out}");
     }

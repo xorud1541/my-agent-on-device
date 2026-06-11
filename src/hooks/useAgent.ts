@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEvent, AssistantMessage, ServerStatus, UiMessage } from "../types";
+import type { AgentEvent, AppConfig, AssistantMessage, ServerStatus, UiMessage } from "../types";
 
 /**
  * 세션 + 이벤트 스트림을 UI 메시지 목록으로 환원하는 훅.
@@ -11,6 +11,9 @@ export function useAgent() {
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [server, setServer] = useState<ServerStatus>({ status: "loading", detail: "" });
+  // 살아있는 설정(워크스페이스/페르소나) — 설정 패널이든 에이전트 도구든
+  // 어디서 바뀌어도 config-changed 이벤트로 즉시 갱신된다
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const sessionRef = useRef<string | null>(null);
 
   // 어시스턴트 마지막 메시지를 불변 갱신
@@ -26,6 +29,10 @@ export function useAgent() {
     const unlisten = listen<AgentEvent>("agent-event", ({ payload: ev }) => {
       if (ev.type === "server-status") {
         setServer({ status: ev.status, detail: ev.detail });
+        return;
+      }
+      if (ev.type === "config-changed") {
+        setConfig(ev.config);
         return;
       }
       if (sessionRef.current && "session_id" in ev && ev.session_id !== sessionRef.current) return;
@@ -97,6 +104,11 @@ export function useAgent() {
     };
   }, [patchAssistant]);
 
+  // 초기 설정 로드 (이후 변경은 config-changed 이벤트가 밀어준다)
+  useEffect(() => {
+    invoke<AppConfig>("get_config").then(setConfig).catch(() => {});
+  }, []);
+
   // ready 이벤트가 리스너 등록 전에 발행되는 레이스 보정: ready 가 아닐 동안 상태 폴링
   useEffect(() => {
     if (server.status === "ready") return;
@@ -153,5 +165,5 @@ export function useAgent() {
     setBusy(false);
   }, []);
 
-  return { messages, busy, server, send, cancel, newChat };
+  return { messages, busy, server, config, send, cancel, newChat };
 }

@@ -1,4 +1,5 @@
-use super::{opt_str, opt_u64, Tool};
+use super::{opt_str, opt_u64, Tool, ToolCtx};
+use crate::tools::workspace::ensure_in_workspace;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -22,7 +23,7 @@ impl Tool for ScreenCapture {
             "required": []
         })
     }
-    fn execute(&self, args: &Value) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let idx = opt_u64(args, "monitor_index").unwrap_or(0) as usize;
         let monitors = xcap::Monitor::all().context("모니터 조회 실패")?;
         let monitor = monitors
@@ -33,10 +34,8 @@ impl Tool for ScreenCapture {
         let out_path = match opt_str(args, "output_path") {
             Some(p) => PathBuf::from(p),
             None => {
-                let base = dirs::picture_dir()
-                    .or_else(dirs::home_dir)
-                    .unwrap_or_else(|| PathBuf::from("."));
-                let dir = base.join("LocalAgent");
+                // 기본 저장 위치는 워크스페이스 아래 captures/
+                let dir = ctx.workspace().join("captures");
                 std::fs::create_dir_all(&dir)?;
                 dir.join(format!(
                     "capture_{}.png",
@@ -44,6 +43,7 @@ impl Tool for ScreenCapture {
                 ))
             }
         };
+        ensure_in_workspace(&out_path.to_string_lossy(), &ctx.workspace())?;
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

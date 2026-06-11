@@ -6,7 +6,7 @@ use local_agent_lib::config::AppConfig;
 use local_agent_lib::llm::client::HttpLlmClient;
 use local_agent_lib::llm::server::LlamaServer;
 use local_agent_lib::models::{AgentEvent, ChatMessage};
-use local_agent_lib::tools::ToolRegistry;
+use local_agent_lib::tools::{ToolCtx, ToolRegistry};
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -29,7 +29,9 @@ async fn one_turn(
     let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
     let started = Instant::now();
 
-    run_turn(client, registry, messages, "e2e", 8, 0.2, &cancel, &|ev| {
+    // noop 컨텍스트 — 실제 config.json 을 건드리지 않는다 (기본 워크스페이스 = 홈)
+    let ctx = ToolCtx::noop(AppConfig::default());
+    run_turn(client, registry, &ctx, messages, "e2e", 8, 0.2, &cancel, &|ev| {
         events.lock().unwrap().push(ev)
     })
     .await
@@ -90,7 +92,7 @@ async fn agent_scenarios_within_latency_budget() {
 
     // ── 1. 싱글턴: 파일 검색 ────────────────────────────────
     println!("[1] 파일 검색");
-    let mut messages = vec![ChatMessage::system(system_prompt())];
+    let mut messages = vec![ChatMessage::system(system_prompt(&AppConfig::default()))];
     let r = one_turn(
         &client, &registry, &mut messages,
         &format!("{} 폴더에서 png 이미지 찾아줘", sandbox.display()),
@@ -116,7 +118,7 @@ async fn agent_scenarios_within_latency_budget() {
 
     // ── 3. 싱글턴: 파일 읽고 내용 답변 ──────────────────────
     println!("[3] 파일 읽기 + 내용 질문");
-    let mut messages2 = vec![ChatMessage::system(system_prompt())];
+    let mut messages2 = vec![ChatMessage::system(system_prompt(&AppConfig::default()))];
     let r = one_turn(
         &client, &registry, &mut messages2,
         &format!("{} 파일 읽고 회의가 언제인지 알려줘", sandbox.join("메모.txt").display()),
@@ -132,13 +134,13 @@ async fn agent_scenarios_within_latency_budget() {
 
     // ── 4. 싱글턴: 화면 캡처 ───────────────────────────────
     println!("[4] 화면 캡처");
-    let mut messages3 = vec![ChatMessage::system(system_prompt())];
+    let mut messages3 = vec![ChatMessage::system(system_prompt(&AppConfig::default()))];
     let r = one_turn(&client, &registry, &mut messages3, "지금 화면 캡처해줘", 60).await;
     assert!(r.tool_names.iter().any(|n| n == "screen_capture"), "screen_capture 미호출");
 
     // ── 5. 잡담: 도구 없이 즉답 ────────────────────────────
     println!("[5] 잡담 (도구 미사용)");
-    let mut messages4 = vec![ChatMessage::system(system_prompt())];
+    let mut messages4 = vec![ChatMessage::system(system_prompt(&AppConfig::default()))];
     let r = one_turn(&client, &registry, &mut messages4, "고마워! 오늘 수고했어", 30).await;
     assert!(r.tool_names.is_empty(), "잡담에 도구 호출함: {:?}", r.tool_names);
     assert!(!r.final_text.is_empty());

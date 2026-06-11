@@ -25,6 +25,14 @@ pub struct AppConfig {
     /// 사고(thinking) 토큰 예산. 0 = 사고 끔(기본), N>0 = 예산, -1 = 무제한.
     /// 사고를 켜면 호출당 +10초 이상 느려지고, 예산 강제 종료 시 빈 응답이 날 수 있다.
     pub reasoning_budget: i32,
+    /// 워크스페이스(작업 폴더). 쓰기성 도구의 출력 경로는 이 안으로 제한된다.
+    pub workspace_dir: String,
+    /// 사용자 이름 (빈 문자열 = 아직 모름 → 에이전트가 대화 초반에 묻는다)
+    pub user_name: String,
+    /// 에이전트 이름 (빈 문자열 = 아직 없음 → 사용자에게 지어달라고 부탁)
+    pub agent_name: String,
+    /// 배경제거 ONNX 모델 경로
+    pub removebg_model: String,
 }
 
 impl Default for AppConfig {
@@ -42,8 +50,28 @@ impl Default for AppConfig {
             temperature: 0.4,
             max_output_tokens: 1024,
             reasoning_budget: 0,
+            workspace_dir: default_workspace_dir(),
+            user_name: String::new(),
+            agent_name: String::new(),
+            removebg_model: default_removebg_model(),
         }
     }
+}
+
+fn default_workspace_dir() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn default_removebg_model() -> String {
+    let home = dirs::home_dir().unwrap_or_default();
+    home.join(".alice")
+        .join("models")
+        .join("removeBG.ort")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn default_server_exe() -> String {
@@ -72,6 +100,15 @@ fn config_file() -> PathBuf {
 }
 
 impl AppConfig {
+    /// 워크스페이스 절대경로. 설정이 비어있으면 홈 디렉토리.
+    pub fn workspace_path(&self) -> PathBuf {
+        if self.workspace_dir.trim().is_empty() {
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            PathBuf::from(&self.workspace_dir)
+        }
+    }
+
     pub fn load() -> Self {
         let path = config_file();
         match std::fs::read_to_string(&path) {

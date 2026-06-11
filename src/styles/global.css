@@ -143,6 +143,27 @@ body::before {
   }
 }
 
+.ws-chip {
+  appearance: none;
+  margin-left: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-chip:hover {
+  border-color: var(--amber);
+  color: var(--ink);
+}
+
 .header-actions {
   margin-left: auto;
   display: flex;
@@ -638,6 +659,19 @@ body::before {
 .settings input:focus {
   border-color: var(--amber);
 }
+.settings .ws-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.settings .ws-row input {
+  flex: 1;
+}
+.settings .ws-row .btn-ghost {
+  flex: none;
+  white-space: nowrap;
+}
+
 .settings .row-btns {
   display: flex;
   gap: 8px;

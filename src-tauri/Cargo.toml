@@ -24,7 +24,10 @@ thiserror = "2"
 walkdir = "2"
 globset = "0.4"
 image = "0.25"
+ndarray = "0.17"
+lopdf = "0.34"
 pdf-extract = "0.10"
+rfd = "0.15"
 xcap = "0.9"
 trash = "5"
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -32,6 +35,14 @@ encoding_rs = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
+
+# ort onnxruntime 적재 — alian 과 동일하게 Windows 는 load-dynamic (MSVC LNK2038 회피).
+# onnxruntime.dll 은 vendor/onnxruntime/ 정본을 ORT_DYLIB_PATH 로 지정해 로드한다.
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.12", features = ["ndarray", "load-dynamic"] }
+
+[target.'cfg(not(windows))'.dependencies]
+ort = { version = "=2.0.0-rc.12", features = ["ndarray"] }
 
 [dev-dependencies]
 tempfile = "3"
