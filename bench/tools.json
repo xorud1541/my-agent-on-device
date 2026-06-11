@@ -1,0 +1,70 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "search_files",
+      "description": "디렉토리에서 이름 패턴/확장자로 파일을 검색한다. 이미지 검색에도 사용.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "root": { "type": "string", "description": "검색 시작 디렉토리 절대경로" },
+          "pattern": { "type": "string", "description": "파일명 글롭 패턴 (예: *.png, 보고서*)" },
+          "recursive": { "type": "boolean", "description": "하위 폴더 포함 여부 (기본 true)" }
+        },
+        "required": ["root", "pattern"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "텍스트 파일 내용을 읽는다.",
+      "parameters": {
+        "type": "object",
+        "properties": { "path": { "type": "string", "description": "파일 절대경로" } },
+        "required": ["path"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "pdf_extract_text",
+      "description": "PDF 파일에서 텍스트를 추출한다. 요약/질문답변 전에 반드시 호출.",
+      "parameters": {
+        "type": "object",
+        "properties": { "path": { "type": "string", "description": "PDF 절대경로" } },
+        "required": ["path"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "image_transform",
+      "description": "이미지를 리사이즈/회전/포맷변환한다.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "원본 이미지 절대경로" },
+          "resize_width": { "type": "integer", "description": "목표 가로 픽셀" },
+          "format": { "type": "string", "enum": ["png", "jpeg", "webp"], "description": "변환할 포맷" }
+        },
+        "required": ["path"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "screen_capture",
+      "description": "현재 화면을 캡처해 PNG로 저장한다.",
+      "parameters": {
+        "type": "object",
+        "properties": { "monitor_index": { "type": "integer", "description": "모니터 번호 (기본 0)" } },
+        "required": []
+      }
+    }
+  }
+]
