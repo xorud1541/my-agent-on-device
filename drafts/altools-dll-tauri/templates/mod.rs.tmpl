@@ -1,0 +1,72 @@
+// Template for altools/mod.rs
+// Adapt based on module selection:
+// - Both ALSTS + ALUpdate: include both mod declarations and all methods
+// - ALSTS only: remove alupdate mod and ALUpdate-related fields/methods
+// - ALUpdate only: remove alsts mod and ALSTS-related fields/methods
+
+mod alsts;     // Include if ALSTS selected
+mod alupdate;  // Include if ALUpdate selected
+
+use std::path::Path;
+
+use alsts::ALSts;         // Include if ALSTS selected
+use alupdate::ALUpdate;   // Include if ALUpdate selected
+
+/// RAII guard for ALSTS + ALUpdate DLL lifecycles.
+///
+/// Each DLL is loaded independently; individual failures are tolerated.
+/// Call `shutdown()` explicitly in `RunEvent::Exit` — do NOT rely on Drop.
+pub struct ALToolsGuard {
+    alsts: Option<ALSts>,         // Include if ALSTS selected
+    alupdate: Option<ALUpdate>,   // Include if ALUpdate selected
+}
+
+impl ALToolsGuard {
+    /// Load DLLs from the executable directory.
+    /// App runs normally even if DLLs are missing (graceful degradation).
+    pub fn new(exe_dir: &Path) -> Self {
+        Self {
+            alsts: ALSts::load(exe_dir),         // Include if ALSTS selected
+            alupdate: ALUpdate::load(exe_dir),   // Include if ALUpdate selected
+        }
+    }
+
+    // Include if ALSTS selected:
+    /// Send an ALSTS statistics event. Returns false if DLL not loaded.
+    pub fn execute_action(&self, action_id: &str) -> bool {
+        match &self.alsts {
+            Some(alsts) => alsts.execute_action(action_id),
+            None => false,
+        }
+    }
+
+    /// Explicitly finalize all loaded DLLs. Safe to call multiple times.
+    /// Must be called in `RunEvent::Exit` before Tauri's internal cleanup.
+    pub fn shutdown(&self) {
+        // Include if ALSTS selected:
+        if let Some(alsts) = &self.alsts {
+            alsts.finalize();
+        }
+        // Include if ALUpdate selected:
+        if let Some(alupdate) = &self.alupdate {
+            alupdate.exit();
+        }
+    }
+
+    // Include if ALUpdate selected:
+    /// Check for updates. Returns false if DLL not loaded.
+    pub fn update_product(&self) -> bool {
+        match &self.alupdate {
+            Some(alupdate) => alupdate.update_product(),
+            None => false,
+        }
+    }
+
+    // Include if ALUpdate selected:
+    /// Check EULA agreement. No-op if DLL not loaded.
+    pub fn check_eula(&self) {
+        if let Some(alupdate) = &self.alupdate {
+            alupdate.check_eula();
+        }
+    }
+}

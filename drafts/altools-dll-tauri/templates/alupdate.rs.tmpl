@@ -1,0 +1,142 @@
+use std::ffi::CString;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use libloading::{Library, Symbol};
+
+/// ALUpdate updater/EULA DLL wrapper.
+///
+/// Calls `ALUpdate_Init` on load, `ALUpdate_Exit` on `exit()` or `Drop`.
+pub struct ALUpdate {
+    // Why Symbol fields before _lib: drop ordering guarantee (same as alsts.rs)
+    exit_fn: Symbol<'static, unsafe extern "system" fn(*const std::ffi::c_char)>,
+    update_product: Symbol<'static, unsafe extern "system" fn(*const std::ffi::c_char) -> bool>,
+    check_eula: Symbol<'static, unsafe extern "system" fn(*const std::ffi::c_char)>,
+    // Why AtomicBool: prevents double-exit when called explicitly in
+    // RunEvent::Exit and again in Drop.
+    exited: AtomicBool,
+    _lib: Library,
+    // Why keep product_name: needed for every Exit, UpdateProduct, CheckEULA call
+    product_name: CString,
+}
+
+const PRODUCT_NAME: &str = "{{PRODUCT_NAME}}";
+const DLL_NAME: &str = "ALUpdate_x64.dll";
+
+impl ALUpdate {
+    /// Load DLL, resolve symbols, and call Init.
+    /// Returns `None` on failure (graceful degradation).
+    pub fn load(exe_dir: &Path) -> Option<Self> {
+        let dll_path = exe_dir.join(DLL_NAME);
+
+        let lib = match unsafe { Library::new(&dll_path) } {
+            Ok(lib) => lib,
+            Err(e) => {
+                eprintln!("[ALUpdate] DLL not found or failed to load: {dll_path:?} — {e}");
+                return None;
+            }
+        };
+
+        // Why extern "system": ALUpdate functions use _stdcall calling convention.
+        // In Rust, extern "system" maps to stdcall on Windows.
+        let (init, exit, update_product, check_eula) = unsafe {
+            let init: Symbol<unsafe extern "system" fn(*const std::ffi::c_char) -> std::ffi::c_long> =
+                match lib.get(b"ALUpdate_Init") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ALUpdate] Symbol ALUpdate_Init not found: {e}");
+                        return None;
+                    }
+                };
+            let exit: Symbol<unsafe extern "system" fn(*const std::ffi::c_char)> =
+                match lib.get(b"ALUpdate_Exit") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ALUpdate] Symbol ALUpdate_Exit not found: {e}");
+                        return None;
+                    }
+                };
+            let upd: Symbol<unsafe extern "system" fn(*const std::ffi::c_char) -> bool> =
+                match lib.get(b"ALUpdate_UpdateProduct") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ALUpdate] Symbol ALUpdate_UpdateProduct not found: {e}");
+                        return None;
+                    }
+                };
+            let eula: Symbol<unsafe extern "system" fn(*const std::ffi::c_char)> =
+                match lib.get(b"ALUpdate_CheckEULA") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ALUpdate] Symbol ALUpdate_CheckEULA not found: {e}");
+                        return None;
+                    }
+                };
+
+            (
+                std::mem::transmute::<
+                    Symbol<unsafe extern "system" fn(*const std::ffi::c_char) -> std::ffi::c_long>,
+                    Symbol<
+                        'static,
+                        unsafe extern "system" fn(*const std::ffi::c_char) -> std::ffi::c_long,
+                    >,
+                >(init),
+                std::mem::transmute::<
+                    Symbol<unsafe extern "system" fn(*const std::ffi::c_char)>,
+                    Symbol<'static, unsafe extern "system" fn(*const std::ffi::c_char)>,
+                >(exit),
+                std::mem::transmute::<
+                    Symbol<unsafe extern "system" fn(*const std::ffi::c_char) -> bool>,
+                    Symbol<'static, unsafe extern "system" fn(*const std::ffi::c_char) -> bool>,
+                >(upd),
+                std::mem::transmute::<
+                    Symbol<unsafe extern "system" fn(*const std::ffi::c_char)>,
+                    Symbol<'static, unsafe extern "system" fn(*const std::ffi::c_char)>,
+                >(eula),
+            )
+        };
+
+        let product_name = CString::new(PRODUCT_NAME).expect("PRODUCT_NAME contains no NUL");
+
+        // Init call (success: 1)
+        let result = unsafe { (init)(product_name.as_ptr()) };
+        if result != 1 {
+            eprintln!("[ALUpdate] Init failed (returned {result}) for {PRODUCT_NAME:?}");
+            return None;
+        }
+        eprintln!("[ALUpdate] Initialized: {PRODUCT_NAME}");
+
+        Some(Self {
+            exit_fn: exit,
+            update_product,
+            check_eula,
+            exited: AtomicBool::new(false),
+            _lib: lib,
+            product_name,
+        })
+    }
+
+    /// Check for updates and run if available. Returns true if update exists.
+    pub fn update_product(&self) -> bool {
+        unsafe { (self.update_product)(self.product_name.as_ptr()) }
+    }
+
+    /// Launch EULA check process (once per day).
+    pub fn check_eula(&self) {
+        unsafe { (self.check_eula)(self.product_name.as_ptr()) };
+    }
+
+    /// Explicitly call ALUpdate_Exit. Safe to call multiple times.
+    pub fn exit(&self) {
+        if !self.exited.swap(true, Ordering::Relaxed) {
+            eprintln!("[ALUpdate] Exiting");
+            unsafe { (self.exit_fn)(self.product_name.as_ptr()) };
+        }
+    }
+}
+
+impl Drop for ALUpdate {
+    fn drop(&mut self) {
+        self.exit();
+    }
+}

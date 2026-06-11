@@ -1,0 +1,122 @@
+use std::ffi::CString;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use libloading::{Library, Symbol};
+
+/// ALSTS statistics DLL wrapper.
+///
+/// Calls `ALSTS_Initialize` on load, `ALSTS_Finalize` on `finalize()` or `Drop`.
+pub struct ALSts {
+    // Why Symbol fields before _lib: Rust drops struct fields in declaration order.
+    // Symbols must drop before Library to prevent dangling pointers.
+    finalize_fn: Symbol<'static, unsafe extern "C" fn()>,
+    // Why bool (not c_int): ALPen ALSTS.h declares C++ bool (1 byte),
+    // NOT Windows BOOL (4-byte int).
+    execute_action: Symbol<'static, unsafe extern "C" fn(*const std::ffi::c_char) -> bool>,
+    // Why AtomicBool: prevents double-finalize when called explicitly in
+    // RunEvent::Exit and again in Drop.
+    finalized: AtomicBool,
+    _lib: Library,
+}
+
+const PRODUCT_NAME: &str = "{{PRODUCT_NAME}}";
+const DLL_NAME: &str = "ALSTS_x64.dll";
+
+impl ALSts {
+    /// Load DLL, resolve symbols, and call Initialize.
+    /// Returns `None` on failure (graceful degradation).
+    pub fn load(exe_dir: &Path) -> Option<Self> {
+        let dll_path = exe_dir.join(DLL_NAME);
+
+        // Why unsafe: DLL loading is inherently unsafe (executes foreign binary)
+        let lib = match unsafe { Library::new(&dll_path) } {
+            Ok(lib) => lib,
+            Err(e) => {
+                eprintln!("[ALSTS] DLL not found or failed to load: {dll_path:?} — {e}");
+                return None;
+            }
+        };
+
+        // Why 'static lifetime transmute: detach Symbol lifetime from Library.
+        // Safety guaranteed by struct drop order (Symbol drops before Library).
+        let (initialize, finalize, execute_action) = unsafe {
+            let init: Symbol<unsafe extern "C" fn(*const std::ffi::c_char) -> bool> =
+                match lib.get(b"ALSTS_Initialize") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ALSTS] Symbol ALSTS_Initialize not found: {e}");
+                        return None;
+                    }
+                };
+            let fin: Symbol<unsafe extern "C" fn()> = match lib.get(b"ALSTS_Finalize") {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[ALSTS] Symbol ALSTS_Finalize not found: {e}");
+                    return None;
+                }
+            };
+            let exec: Symbol<unsafe extern "C" fn(*const std::ffi::c_char) -> bool> =
+                match lib.get(b"ALSTS_ExecuteAction") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[ALSTS] Symbol ALSTS_ExecuteAction not found: {e}");
+                        return None;
+                    }
+                };
+
+            (
+                std::mem::transmute::<
+                    Symbol<unsafe extern "C" fn(*const std::ffi::c_char) -> bool>,
+                    Symbol<'static, unsafe extern "C" fn(*const std::ffi::c_char) -> bool>,
+                >(init),
+                std::mem::transmute::<
+                    Symbol<unsafe extern "C" fn()>,
+                    Symbol<'static, unsafe extern "C" fn()>,
+                >(fin),
+                std::mem::transmute::<
+                    Symbol<unsafe extern "C" fn(*const std::ffi::c_char) -> bool>,
+                    Symbol<'static, unsafe extern "C" fn(*const std::ffi::c_char) -> bool>,
+                >(exec),
+            )
+        };
+
+        let product = CString::new(PRODUCT_NAME).expect("PRODUCT_NAME contains no NUL");
+        let ok = unsafe { (initialize)(product.as_ptr()) };
+        if !ok {
+            eprintln!("[ALSTS] Initialize failed for {PRODUCT_NAME:?}");
+            return None;
+        }
+        eprintln!("[ALSTS] Initialized: {PRODUCT_NAME}");
+
+        Some(Self {
+            finalize_fn: finalize,
+            execute_action,
+            finalized: AtomicBool::new(false),
+            _lib: lib,
+        })
+    }
+
+    /// Send a statistics event.
+    pub fn execute_action(&self, action_id: &str) -> bool {
+        let Ok(c_str) = CString::new(action_id) else {
+            eprintln!("[ALSTS] Invalid action_id (contains NUL): {action_id:?}");
+            return false;
+        };
+        unsafe { (self.execute_action)(c_str.as_ptr()) }
+    }
+
+    /// Explicitly call ALSTS_Finalize. Safe to call multiple times.
+    pub fn finalize(&self) {
+        if !self.finalized.swap(true, Ordering::Relaxed) {
+            eprintln!("[ALSTS] Finalizing");
+            unsafe { (self.finalize_fn)() };
+        }
+    }
+}
+
+impl Drop for ALSts {
+    fn drop(&mut self) {
+        self.finalize();
+    }
+}
