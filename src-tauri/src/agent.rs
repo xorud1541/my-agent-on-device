@@ -43,6 +43,8 @@ pub async fn run_turn(
     let tools = registry.schemas();
     // 같은 (도구, 인자) 반복 차단 — 작은 모델의 루프 + 컨텍스트 낭비 방지
     let mut executed: std::collections::HashSet<(String, String)> = Default::default();
+    // 빈 완성(사고만 하다 종료)은 샘플링 재시도로 한 번 회복을 시도한다
+    let mut empty_retry_left = 1u32;
 
     for round in 0..=max_tool_rounds {
         if cancel.load(Ordering::Relaxed) {
@@ -77,8 +79,12 @@ pub async fn run_turn(
             Err(e) => return Err(e),
         };
 
-        // 사고만 하다 토큰을 소진하면 본문도 툴콜도 없다 — 빈 턴 대신 사용자에게 알린다
+        // 사고만 하다 토큰을 소진하면 본문도 툴콜도 없다 — 재생성 1회 후에도 비면 알린다
         if result.content.is_empty() && result.tool_calls.is_empty() {
+            if empty_retry_left > 0 {
+                empty_retry_left -= 1;
+                continue;
+            }
             emit(AgentEvent::Error {
                 session_id: session_id.to_string(),
                 message: "모델이 응답을 완성하지 못했습니다 (출력 한도 내 사고 초과). 질문을 더 구체적으로 하거나 설정에서 출력 토큰을 늘려보세요.".into(),
@@ -371,10 +377,33 @@ mod tests {
         assert_eq!(messages.last().unwrap().content.as_deref(), Some("회복됨"));
     }
 
-    /// 본문도 툴콜도 없는 빈 완성은 사용자에게 오류로 알린다
+    /// 빈 완성은 1회 재생성으로 회복을 시도하고, 성공하면 오류 없이 끝난다
     #[tokio::test(flavor = "multi_thread")]
-    async fn empty_completion_surfaces_error() {
-        let client = MockClient::ok(vec![CompletionResult::default()]);
+    async fn empty_completion_recovers_with_one_retry() {
+        let client = MockClient::ok(vec![
+            CompletionResult::default(), // 빈 완성
+            CompletionResult { content: "회복된 답변".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("질문")];
+        let events = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &mut messages, "s1", 8, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        assert!(!evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })), "재시도 성공 시 오류 없어야 함");
+        assert_eq!(messages.last().unwrap().content.as_deref(), Some("회복된 답변"));
+    }
+
+    /// 재생성까지 비면 사용자에게 오류로 알린다
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_completion_twice_surfaces_error() {
+        let client = MockClient::ok(vec![CompletionResult::default(), CompletionResult::default()]);
         let registry = ToolRegistry::with_default_tools();
         let mut messages = vec![ChatMessage::user("질문")];
         let events = Mutex::new(Vec::new());

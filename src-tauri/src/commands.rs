@@ -155,7 +155,15 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
     tauri::async_runtime::spawn(async move {
         let client = HttpLlmClient::new(base_url, max_output_tokens);
         let app3 = app2.clone();
-        let emit = move |ev: AgentEvent| emit_event(&app3, ev);
+        // 턴 내에서 발생한 Error 이벤트도 대화 로그에 남도록 수집
+        let turn_errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let errs = turn_errors.clone();
+        let emit = move |ev: AgentEvent| {
+            if let AgentEvent::Error { message, .. } = &ev {
+                errs.lock().unwrap().push(message.clone());
+            }
+            emit_event(&app3, ev);
+        };
 
         let pre_len = messages.len() - 1; // 이번 턴 user 메시지부터 로그에 포함
         let started = std::time::Instant::now();
@@ -164,7 +172,11 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
         )
         .await;
 
-        let error_text = run.as_ref().err().map(|e| format!("{e:#}"));
+        let mut all_errors: Vec<String> = turn_errors.lock().unwrap().clone();
+        if let Err(e) = run.as_ref() {
+            all_errors.push(format!("{e:#}"));
+        }
+        let error_text = if all_errors.is_empty() { None } else { Some(all_errors.join(" | ")) };
         crate::logging::log_turn(
             &sid,
             &messages[pre_len..],

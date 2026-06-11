@@ -36,6 +36,9 @@ impl LlamaServer {
             "--jinja",
             "--no-webui",
             "--reasoning-budget", &cfg.reasoning_budget.to_string(),
+            // 예산 강제 종료 직후 모델이 EOS 로 끝내버리지 않도록 본문/행동으로 유도
+            "--reasoning-budget-message",
+            "생각할 시간이 끝났다. 지금 바로 도구를 호출하거나 한국어로 최종 답변한다.",
         ]);
         #[cfg(windows)]
         {
