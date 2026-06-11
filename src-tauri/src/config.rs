@@ -20,6 +20,8 @@ pub struct AppConfig {
     /// 한 턴에서 허용하는 최대 도구 호출 횟수
     pub max_tool_rounds: u32,
     pub temperature: f32,
+    /// LLM 호출당 출력 토큰 상한 (레이턴시 예산: ~20 t/s 기준 1024 ≈ 50초)
+    pub max_output_tokens: u32,
 }
 
 impl Default for AppConfig {
@@ -34,6 +36,7 @@ impl Default for AppConfig {
             max_tool_rounds: 8,
             // 툴콜 인자 JSON 안정성 우선 (높을수록 무이스케이프 경로 등 미스생성 증가)
             temperature: 0.4,
+            max_output_tokens: 1024,
         }
     }
 }

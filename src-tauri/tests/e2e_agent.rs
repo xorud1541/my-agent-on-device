@@ -76,7 +76,7 @@ async fn agent_scenarios_within_latency_budget() {
     let cfg = AppConfig::default();
     let mut server = LlamaServer::new();
     server.start(&cfg).await.expect("llama-server 시작 실패");
-    let client = HttpLlmClient::new(server.base_url.clone());
+    let client = HttpLlmClient::new(server.base_url.clone(), 1024);
     let registry = ToolRegistry::with_default_tools();
 
     // 시나리오용 샌드박스 (홈 아래 — 시스템 프롬프트의 경로 안내와 일관)

@@ -5,7 +5,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// 스트리밍 중간 콜백. (thinking 토큰인지 여부, 텍스트 조각)
-pub type DeltaSink<'a> = &'a mut (dyn FnMut(DeltaKind, &str) + Send);
+/// false 를 돌려주면 생성을 즉시 중단한다 (사용자 취소).
+pub type DeltaSink<'a> = &'a mut (dyn FnMut(DeltaKind, &str) -> bool + Send);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DeltaKind {
@@ -28,12 +29,14 @@ pub trait LlmClient: Send + Sync {
 /// llama-server OpenAI 호환 엔드포인트용 실제 클라이언트.
 pub struct HttpLlmClient {
     pub base_url: String,
+    /// 호출당 출력 토큰 상한 — 레이턴시 예산의 핵심 레버 (20 t/s 기준 1024 ≈ 50초)
+    pub max_tokens: u32,
     http: reqwest::Client,
 }
 
 impl HttpLlmClient {
-    pub fn new(base_url: String) -> Self {
-        Self { base_url, http: reqwest::Client::new() }
+    pub fn new(base_url: String, max_tokens: u32) -> Self {
+        Self { base_url, max_tokens, http: reqwest::Client::new() }
     }
 }
 
@@ -61,7 +64,7 @@ impl LlmClient for HttpLlmClient {
             "tool_choice": "auto",
             "temperature": temperature,
             "stream": true,
-            "max_tokens": 4096,
+            "max_tokens": self.max_tokens,
         });
 
         // 파싱 계열 500은 스트림 시작 전에 떨어지므로(델타 미방출) 재요청이 안전하다.
@@ -93,7 +96,7 @@ impl LlmClient for HttpLlmClient {
 
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
-        while let Some(chunk) = stream.next().await {
+        'outer: while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("스트림 읽기 실패")?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -110,11 +113,15 @@ impl LlmClient for HttpLlmClient {
 
                 if let Some(t) = delta.get("reasoning_content").and_then(Value::as_str) {
                     result.reasoning.push_str(t);
-                    sink(DeltaKind::Thinking, t);
+                    if !sink(DeltaKind::Thinking, t) {
+                        break 'outer; // 사용자 취소 — 연결을 끊어 서버 생성도 중단시킨다
+                    }
                 }
                 if let Some(t) = delta.get("content").and_then(Value::as_str) {
                     result.content.push_str(t);
-                    sink(DeltaKind::Text, t);
+                    if !sink(DeltaKind::Text, t) {
+                        break 'outer;
+                    }
                 }
                 if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                     for c in calls {
@@ -197,9 +204,9 @@ mod tests {
             }
         });
 
-        let client = HttpLlmClient::new(base_url);
+        let client = HttpLlmClient::new(base_url, 1024);
         let messages = vec![ChatMessage::user("hi")];
-        let mut sink = |_k: DeltaKind, _t: &str| {};
+        let mut sink = |_k: DeltaKind, _t: &str| true;
         let result = client
             .complete(&messages, &serde_json::json!([]), 0.2, &mut sink)
             .await
@@ -233,14 +240,56 @@ mod tests {
             }
         });
 
-        let client = HttpLlmClient::new(base_url);
+        let client = HttpLlmClient::new(base_url, 1024);
         let messages = vec![ChatMessage::user("hi")];
-        let mut sink = |_k: DeltaKind, _t: &str| {};
+        let mut sink = |_k: DeltaKind, _t: &str| true;
         let err = client
             .complete(&messages, &serde_json::json!([]), 0.2, &mut sink)
             .await
             .expect_err("400은 즉시 실패");
         assert!(err.to_string().contains("400"));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// sink 가 false 를 반환하면(사용자 취소) 스트림을 즉시 끊고 부분 결과를 돌려줘야 한다.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sink_false_aborts_stream_midway() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                let _ = sock.write_all(head.as_bytes()).await;
+                // 청크를 천천히 흘려보내며 무한 생성 흉내
+                for i in 0..50 {
+                    let line = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"토큰{i} \"}}}}]}}\n\n");
+                    if sock.write_all(line.as_bytes()).await.is_err() {
+                        break; // 클라이언트가 끊음 — 기대 동작
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                }
+            }
+        });
+
+        let client = HttpLlmClient::new(base_url, 1024);
+        let messages = vec![ChatMessage::user("hi")];
+        let mut seen = 0u32;
+        let mut sink = |_k: DeltaKind, _t: &str| {
+            seen += 1;
+            seen < 3 // 3번째 델타에서 취소
+        };
+        let started = std::time::Instant::now();
+        let result = client
+            .complete(&messages, &serde_json::json!([]), 0.2, &mut sink)
+            .await
+            .expect("취소는 오류가 아니라 부분 결과");
+
+        assert!(result.content.starts_with("토큰0"), "{}", result.content);
+        assert!(seen >= 3 && seen < 50, "스트림이 일찍 끊겨야 함 (seen={seen})");
+        assert!(started.elapsed().as_secs() < 5, "50청크 전체를 기다리면 안 됨");
     }
 }

@@ -73,6 +73,13 @@ export function SettingsPanel({ onClose }: Props) {
           onChange={(e) => setConfig({ ...config, temperature: Number(e.target.value) })}
         />
 
+        <label>호출당 최대 출력 토큰 (레이턴시 상한)</label>
+        <input
+          type="number"
+          value={config.max_output_tokens}
+          onChange={(e) => setConfig({ ...config, max_output_tokens: Number(e.target.value) })}
+        />
+
         <label>턴당 최대 도구 호출</label>
         <input
           type="number"

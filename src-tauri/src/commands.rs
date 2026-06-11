@@ -143,16 +143,16 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
     if base_url.is_empty() {
         return Err("LLM 서버가 아직 준비되지 않음".into());
     }
-    let (max_rounds, temperature) = {
+    let (max_rounds, temperature, max_output_tokens) = {
         let cfg = state.config.lock().unwrap();
-        (cfg.max_tool_rounds, cfg.temperature)
+        (cfg.max_tool_rounds, cfg.temperature, cfg.max_output_tokens)
     };
     let registry = state.registry.clone();
 
     let app2 = app.clone();
     let sid = session_id.clone();
     tauri::async_runtime::spawn(async move {
-        let client = HttpLlmClient::new(base_url);
+        let client = HttpLlmClient::new(base_url, max_output_tokens);
         let app3 = app2.clone();
         let emit = move |ev: AgentEvent| emit_event(&app3, ev);
 

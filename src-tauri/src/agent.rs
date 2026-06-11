@@ -21,7 +21,9 @@ pub fn system_prompt() -> String {
          4. 도구가 실패하면 인자를 고쳐 다시 시도하거나, 불가능하면 이유를 설명한다.\n\
          5. 잡담/지식 질문에는 도구 없이 한국어로 답한다.\n\
          6. 같은 도구를 같은 인자로 반복 호출하지 않는다.\n\
-         7. 도구 인자의 파일 경로는 반드시 슬래시(/)로 쓴다. 예: C:/Users/EST/Downloads (백슬래시 금지)."
+         7. 도구 인자의 파일 경로는 반드시 슬래시(/)로 쓴다. 예: C:/Users/EST/Downloads (백슬래시 금지).\n\
+         8. 답변은 간결하게. 목록이 20개를 넘으면 상위 20개만 보여주고 나머지는 개수로 요약한다.\n\
+            도구 결과를 그대로 길게 옮겨 적지 않는다."
     )
 }
 
@@ -45,7 +47,7 @@ pub async fn run_turn(
             break;
         }
 
-        let mut sink = |kind: DeltaKind, text: &str| {
+        let mut sink = |kind: DeltaKind, text: &str| -> bool {
             let ev = match kind {
                 DeltaKind::Thinking => AgentEvent::ThinkingDelta {
                     session_id: session_id.to_string(),
@@ -57,6 +59,8 @@ pub async fn run_turn(
                 },
             };
             emit(ev);
+            // false 반환 시 클라이언트가 스트림을 끊는다 — 생성 중에도 ■ 버튼이 즉시 듣게
+            !cancel.load(Ordering::Relaxed)
         };
         let result = client.complete(messages, &tools, temperature, &mut sink).await?;
 
