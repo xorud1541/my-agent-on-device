@@ -37,6 +37,14 @@ impl HttpLlmClient {
     }
 }
 
+/// 모델 재생성으로 해소될 수 있는 일시 오류인가?
+/// 대표 사례: 작은 모델이 Windows 경로를 무이스케이프로 복사해 툴콜 인자 JSON 파싱이 깨지는 500.
+pub(crate) fn is_retryable_generation_error(status: u16, body: &str) -> bool {
+    status == 500 && body.contains("Failed to parse tool call")
+}
+
+const MAX_ATTEMPTS: u32 = 3;
+
 #[async_trait::async_trait]
 impl LlmClient for HttpLlmClient {
     async fn complete(
@@ -56,18 +64,28 @@ impl LlmClient for HttpLlmClient {
             "max_tokens": 4096,
         });
 
-        let resp = self
-            .http
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .context("llama-server 요청 실패")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+        // 파싱 계열 500은 스트림 시작 전에 떨어지므로(델타 미방출) 재요청이 안전하다.
+        let mut resp = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let r = self
+                .http
+                .post(format!("{}/v1/chat/completions", self.base_url))
+                .json(&body)
+                .send()
+                .await
+                .context("llama-server 요청 실패")?;
+            if r.status().is_success() {
+                resp = Some(r);
+                break;
+            }
+            let status = r.status();
+            let text = r.text().await.unwrap_or_default();
+            if attempt < MAX_ATTEMPTS && is_retryable_generation_error(status.as_u16(), &text) {
+                continue;
+            }
             bail!("llama-server 오류 {status}: {text}");
         }
+        let resp = resp.expect("loop guarantees Some on success");
 
         let mut result = CompletionResult::default();
         // tool_calls 는 index 별로 조각나서 오므로 누적 후 합친다.
@@ -124,5 +142,105 @@ impl LlmClient for HttpLlmClient {
             });
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn retry_predicate_matches_tool_parse_500_only() {
+        let parse_err = r#"{"error":{"code":500,"message":"Failed to parse tool call arguments as JSON: ..."}}"#;
+        assert!(is_retryable_generation_error(500, parse_err));
+        assert!(!is_retryable_generation_error(400, parse_err));
+        assert!(!is_retryable_generation_error(500, "out of memory"));
+    }
+
+    /// 1회차: 툴콜 파싱 500 → 2회차: 정상 SSE. 클라이언트가 재시도로 회복해야 한다.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovers_from_tool_parse_500_by_retrying() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicU32::new(0));
+
+        let hits2 = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let n = hits2.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let resp = if n == 0 {
+                    let body = r#"{"error":{"code":500,"message":"Failed to parse tool call arguments as JSON: invalid string"}}"#;
+                    format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    let sse = concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"안녕\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    );
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        sse.len(),
+                        sse
+                    )
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = HttpLlmClient::new(base_url);
+        let messages = vec![ChatMessage::user("hi")];
+        let mut sink = |_k: DeltaKind, _t: &str| {};
+        let result = client
+            .complete(&messages, &serde_json::json!([]), 0.2, &mut sink)
+            .await
+            .expect("재시도로 회복해야 함");
+
+        assert_eq!(result.content, "안녕");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "정확히 2회 요청해야 함");
+    }
+
+    /// 재시도 불가 오류(4xx 등)는 즉시 실패해야 한다.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_retryable_error_fails_immediately() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicU32::new(0));
+
+        let hits2 = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                hits2.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let body = r#"{"error":{"code":400,"message":"bad request"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = HttpLlmClient::new(base_url);
+        let messages = vec![ChatMessage::user("hi")];
+        let mut sink = |_k: DeltaKind, _t: &str| {};
+        let err = client
+            .complete(&messages, &serde_json::json!([]), 0.2, &mut sink)
+            .await
+            .expect_err("400은 즉시 실패");
+        assert!(err.to_string().contains("400"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

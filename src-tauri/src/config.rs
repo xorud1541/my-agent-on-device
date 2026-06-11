@@ -32,7 +32,8 @@ impl Default for AppConfig {
             n_gpu_layers: 99,
             ctx_size: 8192,
             max_tool_rounds: 8,
-            temperature: 0.7,
+            // 툴콜 인자 JSON 안정성 우선 (높을수록 무이스케이프 경로 등 미스생성 증가)
+            temperature: 0.4,
         }
     }
 }
