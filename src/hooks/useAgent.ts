@@ -97,6 +97,24 @@ export function useAgent() {
     };
   }, [patchAssistant]);
 
+  // ready 이벤트가 리스너 등록 전에 발행되는 레이스 보정: ready 가 아닐 동안 상태 폴링
+  useEffect(() => {
+    if (server.status === "ready") return;
+    const timer = setInterval(async () => {
+      try {
+        const status = await invoke<string>("server_status");
+        if (status === "ready") {
+          const cfg = await invoke<{ model_path: string }>("get_config");
+          const model = cfg.model_path.split(/[\\/]/).pop() ?? "";
+          setServer({ status: "ready", detail: model });
+        }
+      } catch {
+        // 백엔드 미준비 — 다음 틱에 재시도
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [server.status]);
+
   const ensureSession = useCallback(async () => {
     if (!sessionRef.current) {
       sessionRef.current = await invoke<string>("new_session");
