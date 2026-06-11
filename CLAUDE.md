@@ -14,7 +14,7 @@ CPU + iGPU(Vulkan)에서 llama.cpp 사이드카로 동작하는 로컬 온디바
 ## 프로젝트 구조
 ```
 src/                  → React 프론트엔드 (hooks/useAgent.ts 가 이벤트 → 상태 환원)
-src-tauri/src/        → agent.rs(루프), llm/(사이드카+클라이언트), tools/(도구), commands.rs(IPC)
+src-tauri/src/        → agent.rs(루프+히스토리 예산), llm/(사이드카+클라이언트), tools/(도구), commands.rs(IPC), sessions.rs(대화 영속화)
 src-tauri/tests/      → e2e_agent.rs (실제 모델 E2E)
 bench/                → 모델 벤치마크 하니스
 ```
@@ -34,5 +34,7 @@ cd src-tauri && cargo test --test e2e_agent --release -- --ignored --nocapture -
 - 쓰기성 도구(파일 생성/수정/삭제/출력 저장)는 반드시 `workspace::ensure_in_workspace` 가드를 거칠 것
 - 설정을 바꾸는 도구는 `ctx.update_config()` 사용 (저장 + config-changed 방송이 한 번에 됨)
 - 파괴적 도구는 금지 — 삭제는 반드시 휴지통(trash crate) 경유
+- system 메시지는 항상 messages[0] 1개만 — Qwen 챗 템플릿이 중간 system 을 400 으로 거부함.
+  히스토리에 시스템성 컨텍스트를 추가하려면 시스템 프롬프트 본문에 섹션으로 합칠 것(agent.rs DIGEST 패턴)
 - ONNX 도구는 ort load-dynamic — `vendor/onnxruntime/onnxruntime.dll` 필요 (`ensure_ort_dylib` 가 경로 설정)
 - 스킬을 추가/삭제/이름변경할 때 README.md도 같이 업데이트할 것

@@ -37,6 +37,23 @@ export interface AssistantMessage {
 
 export type UiMessage = UserMessage | AssistantMessage;
 
+// 백엔드 ChatMessage(OpenAI 호환)와 1:1 대응 — 세션 복원에 사용
+export interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string | null;
+  tool_calls?: { id: string; type: string; function: { name: string; arguments: string } }[] | null;
+  tool_call_id?: string | null;
+}
+
+// 백엔드 sessions::SessionMeta 와 1:1 대응
+export interface SessionMeta {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turns: number;
+}
+
 export interface ModelEntry {
   name: string;
   path: string;

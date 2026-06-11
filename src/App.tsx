@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Composer } from "./components/Composer";
 import { MessageView } from "./components/MessageView";
+import { SessionsSidebar } from "./components/SessionsSidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { useAgent } from "./hooks/useAgent";
 
@@ -18,8 +19,10 @@ function lastSegment(p: string) {
 }
 
 function App() {
-  const { messages, busy, server, config, send, cancel, newChat } = useAgent();
+  const { messages, busy, server, config, send, cancel, newChat, loadSession, sessionId } =
+    useAgent();
   const [showSettings, setShowSettings] = useState(false);
+  const [showSessions, setShowSessions] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // 새 콘텐츠가 생기면 맨 아래로
@@ -64,14 +67,26 @@ function App() {
           <button className="icon-btn" onClick={newChat}>
             + 새 대화
           </button>
+          <button
+            className={`icon-btn ${showSessions ? "on" : ""}`}
+            title="대화 목록 열기/닫기"
+            onClick={() => setShowSessions((v) => !v)}
+          >
+            ☰ 목록
+          </button>
           <button className="icon-btn" onClick={() => setShowSettings(true)}>
             설정
           </button>
         </div>
       </header>
 
-      <div className="chat-scroll" ref={scrollRef}>
-        <div className="chat-inner">
+      <div className="body">
+        {showSessions && (
+          <SessionsSidebar activeId={sessionId} busy={busy} onLoad={loadSession} />
+        )}
+        <div className="main">
+          <div className="chat-scroll" ref={scrollRef}>
+            <div className="chat-inner">
           {messages.length === 0 ? (
             <div className="empty-state">
               <div className="empty-mark">
@@ -99,10 +114,17 @@ function App() {
           ) : (
             messages.map((m, i) => <MessageView key={i} msg={m} />)
           )}
+            </div>
+          </div>
+
+          <Composer
+            busy={busy}
+            disabled={server.status !== "ready"}
+            onSend={send}
+            onCancel={cancel}
+          />
         </div>
       </div>
-
-      <Composer busy={busy} disabled={server.status !== "ready"} onSend={send} onCancel={cancel} />
 
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </div>

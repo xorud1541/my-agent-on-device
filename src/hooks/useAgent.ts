@@ -1,7 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEvent, AppConfig, AssistantMessage, ServerStatus, UiMessage } from "../types";
+import { chatToUi } from "../lib/restore";
+import type {
+  AgentEvent,
+  AppConfig,
+  AssistantMessage,
+  ChatMessage,
+  ServerStatus,
+  UiMessage,
+} from "../types";
 
 /**
  * 세션 + 이벤트 스트림을 UI 메시지 목록으로 환원하는 훅.
@@ -14,7 +22,9 @@ export function useAgent() {
   // 살아있는 설정(워크스페이스/페르소나) — 설정 패널이든 에이전트 도구든
   // 어디서 바뀌어도 config-changed 이벤트로 즉시 갱신된다
   const [config, setConfig] = useState<AppConfig | null>(null);
+  // ref: 이벤트 필터링용(리스너 클로저에서 최신값 필요) / state: UI 표시용(대화 목록 강조)
   const sessionRef = useRef<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   // 어시스턴트 마지막 메시지를 불변 갱신
   const patchAssistant = useCallback((fn: (m: AssistantMessage) => AssistantMessage) => {
@@ -130,6 +140,7 @@ export function useAgent() {
   const ensureSession = useCallback(async () => {
     if (!sessionRef.current) {
       sessionRef.current = await invoke<string>("new_session");
+      setSessionId(sessionRef.current);
     }
     return sessionRef.current;
   }, []);
@@ -160,10 +171,21 @@ export function useAgent() {
   }, []);
 
   const newChat = useCallback(() => {
+    // 진행된 대화는 턴마다 백엔드가 디스크에 저장하므로 여기선 화면만 비운다
     sessionRef.current = null;
+    setSessionId(null);
     setMessages([]);
     setBusy(false);
   }, []);
 
-  return { messages, busy, server, config, send, cancel, newChat };
+  /** 저장된 세션을 불러와 화면을 복원하고, 이어서 대화할 수 있게 한다 */
+  const loadSession = useCallback(async (id: string) => {
+    const history = await invoke<ChatMessage[]>("load_session", { sessionId: id });
+    sessionRef.current = id;
+    setSessionId(id);
+    setMessages(chatToUi(history));
+    setBusy(false);
+  }, []);
+
+  return { messages, busy, server, config, send, cancel, newChat, loadSession, sessionId };
 }

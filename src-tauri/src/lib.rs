@@ -4,6 +4,7 @@ pub mod config;
 pub mod llm;
 pub mod logging;
 pub mod models;
+pub mod sessions;
 pub mod tools;
 
 use config::AppConfig;
@@ -52,6 +53,9 @@ pub fn run() {
             commands::send_message,
             commands::cancel_turn,
             commands::pick_folder,
+            commands::list_sessions,
+            commands::load_session,
+            commands::delete_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -35,7 +35,8 @@ function AssistantView({ msg }: { msg: AssistantMessage }) {
           <i />
         </span>
       )}
-      {!inProgress && (
+      {/* elapsedMs 0 은 복원된 턴(측정값 없음) — 배지를 숨긴다 */}
+      {!inProgress && msg.elapsedMs! > 0 && (
         <div className="turn-meta">{(msg.elapsedMs! / 1000).toFixed(1)}s</div>
       )}
     </div>

@@ -2,6 +2,7 @@ use crate::agent;
 use crate::config::AppConfig;
 use crate::llm::client::HttpLlmClient;
 use crate::models::{AgentEvent, ChatMessage};
+use crate::sessions::{SessionMeta, SessionStore};
 use crate::AppState;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -133,6 +134,32 @@ pub fn new_session(state: State<'_, AppState>) -> String {
     id
 }
 
+/// 저장된 세션 목록 (최근 수정 순)
+#[tauri::command]
+pub fn list_sessions() -> Vec<SessionMeta> {
+    SessionStore::open_default().list()
+}
+
+/// 저장된 세션을 메모리로 불러와 이어서 대화할 수 있게 하고, 복원용 이력을 돌려준다
+#[tauri::command]
+pub fn load_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<ChatMessage>, String> {
+    let messages = SessionStore::open_default()
+        .load(&session_id)
+        .ok_or_else(|| format!("저장된 세션 없음: {session_id}"))?;
+    state.sessions.lock().unwrap().insert(session_id, messages.clone());
+    Ok(messages)
+}
+
+#[tauri::command]
+pub fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    SessionStore::open_default().delete(&session_id).map_err(|e| e.to_string())?;
+    state.sessions.lock().unwrap().remove(&session_id);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn cancel_turn(state: State<'_, AppState>, session_id: String) {
     if let Some(flag) = state.cancels.lock().unwrap().get(&session_id) {
@@ -147,17 +174,25 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
 
     let mut messages = {
         let mut sessions = state.sessions.lock().unwrap();
+        // 메모리에 없으면 디스크에서 복원 — 백엔드 재시작 후에도 기존 세션을 이어간다
+        if !sessions.contains_key(&session_id) {
+            if let Some(saved) = SessionStore::open_default().load(&session_id) {
+                sessions.insert(session_id.clone(), saved);
+            }
+        }
         let history = sessions
             .get_mut(&session_id)
             .ok_or_else(|| format!("세션 없음: {session_id}"))?;
         history.push(ChatMessage::user(text));
         history.clone()
     };
-    // 워크스페이스/페르소나/시각이 살아있도록 시스템 프롬프트를 매 턴 재생성
-    if let Some(first) = messages.first_mut() {
-        if first.role == "system" {
-            *first = ChatMessage::system(agent::system_prompt(&state.config.lock().unwrap()));
-        }
+    {
+        let cfg = state.config.lock().unwrap();
+        // 워크스페이스/페르소나/시각이 살아있도록 시스템 프롬프트를 매 턴 재생성
+        // (예산 관리가 접어 넣은 [이전 대화 요약] 섹션은 보존된다)
+        agent::refresh_system_prompt(&mut messages, &cfg);
+        // 컨텍스트 예산: 오래된 턴은 요약으로 접고 최근 턴만 원문 유지 (작은 모델 맥락 전략)
+        agent::enforce_history_budget(&mut messages, agent::history_budget_chars(cfg.ctx_size));
     }
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -222,6 +257,10 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
             emit(AgentEvent::TurnEnd { session_id: sid.clone(), elapsed_ms: 0 });
         }
 
+        // 턴마다 디스크에 영속화 — 새 대화/앱 재시작 후에도 목록에서 불러올 수 있다
+        if let Err(e) = SessionStore::open_default().save(&sid, &messages) {
+            eprintln!("세션 저장 실패({sid}): {e:#}");
+        }
         let state = app2.state::<AppState>();
         state.sessions.lock().unwrap().insert(sid.clone(), messages);
         state.cancels.lock().unwrap().remove(&sid);
