@@ -156,10 +156,20 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
         let app3 = app2.clone();
         let emit = move |ev: AgentEvent| emit_event(&app3, ev);
 
+        let pre_len = messages.len() - 1; // 이번 턴 user 메시지부터 로그에 포함
+        let started = std::time::Instant::now();
         let run = agent::run_turn(
             &client, &registry, &mut messages, &sid, max_rounds, temperature, &cancel, &emit,
         )
         .await;
+
+        let error_text = run.as_ref().err().map(|e| format!("{e:#}"));
+        crate::logging::log_turn(
+            &sid,
+            &messages[pre_len..],
+            started.elapsed().as_millis() as u64,
+            error_text.as_deref(),
+        );
 
         if let Err(e) = run {
             emit(AgentEvent::Error { session_id: sid.clone(), message: format!("{e:#}") });

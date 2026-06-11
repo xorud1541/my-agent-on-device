@@ -42,6 +42,14 @@ impl LlamaServer {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        // 서버 출력은 파일로 (문제 추적용)
+        let log_path = crate::logging::llama_server_log_file();
+        if let Ok(log) = std::fs::File::create(&log_path) {
+            if let Ok(log2) = log.try_clone() {
+                cmd.stdout(std::process::Stdio::from(log));
+                cmd.stderr(std::process::Stdio::from(log2));
+            }
+        }
         cmd.kill_on_drop(true);
         let child = cmd.spawn().context("llama-server 실행 실패")?;
         self.child = Some(child);
