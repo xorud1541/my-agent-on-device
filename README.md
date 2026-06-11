@@ -31,20 +31,30 @@ pnpm tauri build
 
 ```
 React (채팅 UI) ── invoke/listen ── Rust (Tauri)
-                                      ├─ agent.rs    에이전트 루프 (툴콜 반복, 라운드 한도)
+                                      ├─ agent.rs    에이전트 루프 (툴콜 반복, 취소, 회복)
                                       ├─ llm/        llama-server 사이드카 + SSE 스트리밍 클라이언트
                                       ├─ tools/      list_dir, read/write_file, move/copy/delete,
                                       │              search_files, image_info/transform,
-                                      │              pdf_extract_text, screen_capture
+                                      │              pdf_extract_text, screen_capture,
+                                      │              zip_create/zip_extract
                                       └─ commands.rs IPC 커맨드 + 세션 관리
                                             │ HTTP (OpenAI 호환, localhost)
                                             ▼
-                                     llama-server.exe (Vulkan0 = Intel iGPU)
+                                     llama-server.exe (Vulkan0 = Intel iGPU, --reasoning off)
 ```
 
 - 이벤트 채널 `agent-event` 하나로 `thinking-delta / text-delta / tool-call-start /
   tool-call-end / turn-end / error / server-status` 를 스트리밍한다.
-- 모델 선정 근거와 벤치마크: `docs/superpowers/specs/2026-06-11-local-agent-design.md`
+- 대화 로그: `%APPDATA%\com.estsoft.local-agent\logs\chat_YYYYMMDD.jsonl` (+ llama-server.log)
+
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 구조, 설계 결정과 근거, 에이전트 루프, 레이턴시 예산, 도구 추가법, 설정 레퍼런스 |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 실사용 로그로 잡은 버그 7건 사례집 + 로그 보는 법 + 개발 환경 함정 |
+| [docs/TESTING.md](docs/TESTING.md) | 단위/E2E/UI 자동구동/모델 벤치 실행법 |
+| [docs/superpowers/specs/](docs/superpowers/specs/) | 1차 설계 문서 + 모델 벤치마크 결과 |
 
 ## 테스트
 
