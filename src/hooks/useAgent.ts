@@ -1,0 +1,139 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { AgentEvent, AssistantMessage, ServerStatus, UiMessage } from "../types";
+
+/**
+ * 세션 + 이벤트 스트림을 UI 메시지 목록으로 환원하는 훅.
+ * 이벤트는 항상 "마지막 어시스턴트 메시지"에 누적된다.
+ */
+export function useAgent() {
+  const [messages, setMessages] = useState<UiMessage[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [server, setServer] = useState<ServerStatus>({ status: "loading", detail: "" });
+  const sessionRef = useRef<string | null>(null);
+
+  // 어시스턴트 마지막 메시지를 불변 갱신
+  const patchAssistant = useCallback((fn: (m: AssistantMessage) => AssistantMessage) => {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (!last || last.role !== "assistant") return prev;
+      return [...prev.slice(0, -1), fn(last)];
+    });
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<AgentEvent>("agent-event", ({ payload: ev }) => {
+      if (ev.type === "server-status") {
+        setServer({ status: ev.status, detail: ev.detail });
+        return;
+      }
+      if (sessionRef.current && "session_id" in ev && ev.session_id !== sessionRef.current) return;
+
+      switch (ev.type) {
+        case "thinking-delta":
+          patchAssistant((m) => {
+            const segs = [...m.segments];
+            const last = segs[segs.length - 1];
+            if (last?.kind === "thinking" && !last.done) {
+              segs[segs.length - 1] = { ...last, text: last.text + ev.delta };
+            } else {
+              segs.push({ kind: "thinking", text: ev.delta, done: false });
+            }
+            return { ...m, segments: segs };
+          });
+          break;
+        case "text-delta":
+          patchAssistant((m) => {
+            const segs = m.segments.map((s) =>
+              s.kind === "thinking" && !s.done ? { ...s, done: true } : s,
+            );
+            const last = segs[segs.length - 1];
+            if (last?.kind === "text") {
+              segs[segs.length - 1] = { ...last, text: last.text + ev.delta };
+            } else {
+              segs.push({ kind: "text", text: ev.delta });
+            }
+            return { ...m, segments: segs };
+          });
+          break;
+        case "tool-call-start":
+          patchAssistant((m) => ({
+            ...m,
+            segments: [
+              ...m.segments.map((s) => (s.kind === "thinking" && !s.done ? { ...s, done: true } : s)),
+              { kind: "tool", callId: ev.call_id, name: ev.name, arguments: ev.arguments, status: "running" },
+            ],
+          }));
+          break;
+        case "tool-call-end":
+          patchAssistant((m) => ({
+            ...m,
+            segments: m.segments.map((s) =>
+              s.kind === "tool" && s.callId === ev.call_id && s.status === "running"
+                ? { ...s, status: ev.ok ? "ok" : "error", result: ev.result }
+                : s,
+            ),
+          }));
+          break;
+        case "error":
+          patchAssistant((m) => ({
+            ...m,
+            segments: [...m.segments, { kind: "error", message: ev.message }],
+          }));
+          break;
+        case "turn-end":
+          patchAssistant((m) => ({
+            ...m,
+            elapsedMs: ev.elapsed_ms,
+            segments: m.segments.map((s) => (s.kind === "thinking" && !s.done ? { ...s, done: true } : s)),
+          }));
+          setBusy(false);
+          break;
+      }
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [patchAssistant]);
+
+  const ensureSession = useCallback(async () => {
+    if (!sessionRef.current) {
+      sessionRef.current = await invoke<string>("new_session");
+    }
+    return sessionRef.current;
+  }, []);
+
+  const send = useCallback(
+    async (text: string) => {
+      const sessionId = await ensureSession();
+      setMessages((prev) => [...prev, { role: "user", text }, { role: "assistant", segments: [] }]);
+      setBusy(true);
+      try {
+        await invoke("send_message", { sessionId, text });
+      } catch (e) {
+        patchAssistant((m) => ({
+          ...m,
+          elapsedMs: 0,
+          segments: [...m.segments, { kind: "error", message: String(e) }],
+        }));
+        setBusy(false);
+      }
+    },
+    [ensureSession, patchAssistant],
+  );
+
+  const cancel = useCallback(async () => {
+    if (sessionRef.current) {
+      await invoke("cancel_turn", { sessionId: sessionRef.current });
+    }
+  }, []);
+
+  const newChat = useCallback(() => {
+    sessionRef.current = null;
+    setMessages([]);
+    setBusy(false);
+  }, []);
+
+  return { messages, busy, server, send, cancel, newChat };
+}
