@@ -103,7 +103,10 @@ impl Tool for WriteFile {
         "write_file"
     }
     fn description(&self) -> &'static str {
-        "파일에 텍스트를 쓴다. 기존 파일은 overwrite=true 일 때만 덮어쓴다."
+        // '~라고 적어줘/저장해줘' 동사를 명시해야 2B 모델이 read_file 과 혼동하지 않는다
+        // (2026-06-11 GT 평가: 동사 없는 설명에서 write 의도 3/5 가 read_file 로 오선택)
+        "파일에 텍스트를 적어 저장한다 (적어줘/저장해줘/기록해줘/작성해줘/메모해줘). \
+         사용자가 불러준 내용을 파일로 만들 때 사용. 기존 파일은 overwrite=true 일 때만 덮어쓴다."
     }
     fn parameters(&self) -> Value {
         json!({

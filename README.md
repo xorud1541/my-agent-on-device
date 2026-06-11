@@ -56,6 +56,7 @@ React (채팅 UI) ── invoke/listen ── Rust (Tauri)
 - **배경제거**: `remove_background` 도구. `~/.alice/models/removeBG.ort` (ONNX Runtime,
   Windows 는 load-dynamic — `src-tauri/vendor/onnxruntime/onnxruntime.dll` 사용, 빌드 시 번들).
 - **이미지 → PDF**: `images_to_pdf` 도구 (JPEG 무손실 passthrough, EXIF/알파 보정, A4/Letter/Fit).
+  경로 배열(`paths`) 또는 폴더(`dir`, 이름순) 입력 — 작은 모델이 경로를 직접 옮겨 적지 않아도 된다.
 - **페르소나**: 이름(user_name/agent_name)이 비어 있으면 대화 초반에 서로 이름을 묻고
   `update_profile` 로 영속화. 설정 패널에서도 수정 가능.
 

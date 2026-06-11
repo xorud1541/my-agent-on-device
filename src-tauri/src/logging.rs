@@ -4,7 +4,13 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// 로그 디렉토리: %APPDATA%/com.estsoft.local-agent/logs
+/// LOCAL_AGENT_LOG_DIR 환경변수로 재지정 가능 — 테스트가 실사용 로그를 오염시키지 않게.
 pub fn log_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("LOCAL_AGENT_LOG_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.estsoft.local-agent")
@@ -57,14 +63,20 @@ mod tests {
 
     #[test]
     fn log_turn_appends_jsonl_line() {
+        // 실사용 %APPDATA% 로그를 오염시키지 않도록 임시 폴더로 격리
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("LOCAL_AGENT_LOG_DIR", tmp.path());
+
         let msgs = vec![
             ChatMessage::user("테스트"),
             ChatMessage::assistant(Some("응답".into()), None),
         ];
         log_turn("test-session", &msgs, 1234, None);
         let today = chrono::Local::now().format("%Y%m%d");
-        let path = log_dir().join(format!("chat_{today}.jsonl"));
+        let path = tmp.path().join(format!("chat_{today}.jsonl"));
         let content = std::fs::read_to_string(&path).unwrap();
+        std::env::remove_var("LOCAL_AGENT_LOG_DIR");
+
         let last = content.lines().last().unwrap();
         let v: serde_json::Value = serde_json::from_str(last).unwrap();
         assert_eq!(v["session_id"], "test-session");

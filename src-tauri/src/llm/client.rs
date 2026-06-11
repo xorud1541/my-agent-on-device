@@ -34,6 +34,11 @@ pub struct HttpLlmClient {
     http: reqwest::Client,
 }
 
+/// 반복 패널티. llama-server 기본값은 1.0(꺼짐)이라, 2B 모델이 툴콜 인자에서
+/// 단일 바이트 토큰을 출력 한도까지 반복하는 붕괴를 막지 못한다 (2026-06-11 사고).
+/// 경로처럼 정당한 반복이 많은 출력도 있어 보수적으로 1.1 을 쓴다.
+const REPEAT_PENALTY: f32 = 1.1;
+
 impl HttpLlmClient {
     pub fn new(base_url: String, max_tokens: u32) -> Self {
         Self { base_url, max_tokens, http: reqwest::Client::new() }
@@ -63,6 +68,7 @@ impl LlmClient for HttpLlmClient {
             "tools": tools,
             "tool_choice": "auto",
             "temperature": temperature,
+            "repeat_penalty": REPEAT_PENALTY,
             "stream": true,
             "max_tokens": self.max_tokens,
         });
@@ -214,6 +220,36 @@ mod tests {
 
         assert_eq!(result.content, "안녕");
         assert_eq!(hits.load(Ordering::SeqCst), 2, "정확히 2회 요청해야 함");
+    }
+
+    /// 요청 바디에 반복 패널티가 실려야 한다 — 2B 모델 토큰 반복 붕괴 방지.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_body_includes_repeat_penalty() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16384];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let sse = "data: [DONE]\n\n";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse.len(),
+                sse
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+
+        let client = HttpLlmClient::new(base_url, 1024);
+        let messages = vec![ChatMessage::user("hi")];
+        let mut sink = |_k: DeltaKind, _t: &str| true;
+        let _ = client.complete(&messages, &serde_json::json!([]), 0.2, &mut sink).await;
+
+        let request = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(request.contains("\"repeat_penalty\":1.1"), "요청에 repeat_penalty 없음:\n{request}");
     }
 
     /// 재시도 불가 오류(4xx 등)는 즉시 실패해야 한다.

@@ -21,3 +21,7 @@ Thumbs.db
 
 # Claude Code 로컬 세션
 .claude/
+
+# Bench artifacts (generated locally, contain local paths)
+bench/dump*.json
+bench/gt_run_*.txt

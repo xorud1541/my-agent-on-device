@@ -1,7 +1,7 @@
 //! 이미지들 → PDF 묶기. alian(alice-tools-pdf) 선작업 포팅.
 //! JPEG 무손실 passthrough, EXIF 회전/알파/CMYK 보정, 일괄 검증 fail-fast, 원자적 저장.
 
-use super::{opt_str, req_str, Tool, ToolCtx};
+use super::{opt_str, Tool, ToolCtx};
 use crate::tools::workspace::ensure_in_workspace;
 use anyhow::{bail, Result};
 use image::{metadata::Orientation, ColorType, GenericImageView, ImageDecoder, ImageReader};
@@ -321,6 +321,41 @@ fn encode_raw(path: &Path) -> Result<(Stream, u32, u32)> {
 
 // ---------- 도구 ----------
 
+/// probe_image 가 받아주는 확장자와 동일하게 유지할 것
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp"];
+
+/// output_path 생략 시 워크스페이스의 비충돌 기본 이름 (images.pdf, images_2.pdf, ...)
+fn default_output_path(ws: &Path) -> PathBuf {
+    let base = ws.join("images.pdf");
+    if !base.exists() {
+        return base;
+    }
+    (2u32..)
+        .map(|i| ws.join(format!("images_{i}.pdf")))
+        .find(|p| !p.exists())
+        .expect("비충돌 이름은 반드시 존재")
+}
+
+/// 폴더(비재귀)의 이미지 파일을 이름순으로 모은다. 작은 모델이 경로 배열을
+/// 직접 옮겨 적다 생기는 인자 오염을 피하기 위한 dir 인자 경로.
+fn collect_images_sorted(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| anyhow::anyhow!("폴더 열기 실패: {}: {e}", dir.display()))?;
+    let mut out: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| IMAGE_EXTS.contains(&s.to_ascii_lowercase().as_str()))
+                    .unwrap_or(false)
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
 pub struct ImagesToPdf;
 
 impl Tool for ImagesToPdf {
@@ -328,25 +363,31 @@ impl Tool for ImagesToPdf {
         "images_to_pdf"
     }
     fn description(&self) -> &'static str {
-        "여러 이미지를 한 장씩 페이지로 묶어 PDF 파일을 만든다. 이미지 순서 = 페이지 순서."
+        "여러 이미지를 한 장씩 페이지로 묶어 PDF 파일을 만든다. \
+         폴더의 이미지 전체를 묶을 땐 paths 대신 dir 에 폴더 경로 하나만 넘긴다. \
+         이미지 순서 = 페이지 순서 (dir 은 이름순)."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
+                "dir": {
+                    "type": "string",
+                    "description": "이미지 폴더 절대경로 — 폴더 안 모든 이미지를 이름순으로 묶는다 (paths 대신 사용)"
+                },
                 "paths": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "이미지 절대경로 목록 (페이지 순서대로)"
+                    "description": "이미지 절대경로 목록 (페이지 순서대로). dir 을 줬으면 생략"
                 },
-                "output_path": { "type": "string", "description": "생성할 .pdf 절대경로" },
+                "output_path": { "type": "string", "description": "생성할 .pdf 절대경로 — 생략하면 워크스페이스에 자동 이름으로 저장 (생략 권장)" },
                 "page_size": { "type": "string", "enum": ["a4", "letter", "fit"], "description": "페이지 크기 (기본 a4, fit=이미지 크기 그대로)" }
             },
-            "required": ["paths", "output_path"]
+            "required": []
         })
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
-        let paths: Vec<PathBuf> = args
+        let mut paths: Vec<PathBuf> = args
             .get("paths")
             .and_then(Value::as_array)
             .map(|a| {
@@ -357,16 +398,38 @@ impl Tool for ImagesToPdf {
             })
             .unwrap_or_default();
         if paths.is_empty() {
-            bail!("필수 인자 누락: paths (이미지 경로 배열)");
+            if let Some(dir) = opt_str(args, "dir") {
+                paths = collect_images_sorted(Path::new(dir))?;
+                if paths.is_empty() {
+                    bail!("폴더에 이미지가 없음: {dir}");
+                }
+            }
         }
-        let output = PathBuf::from(req_str(args, "output_path")?);
-        if output
-            .extension()
-            .map(|e| !e.eq_ignore_ascii_case("pdf"))
-            .unwrap_or(true)
-        {
-            bail!("출력은 .pdf 만 가능: {}", output.display());
+        if paths.is_empty() {
+            bail!("필수 인자 누락: dir(이미지 폴더) 또는 paths(이미지 경로 배열)");
         }
+        let output = match opt_str(args, "output_path") {
+            Some(s) => {
+                let mut p = PathBuf::from(s);
+                // 작은 모델이 폴더 모양 경로(확장자 없음)를 주는 실수를 흡수한다
+                // (2026-06-11: ".alice\pdfs" 거부 → 모델이 경로 수정 못 하고 라운드 소진)
+                if p.extension().is_none() {
+                    p.set_extension("pdf");
+                }
+                if p.extension()
+                    .map(|e| !e.eq_ignore_ascii_case("pdf"))
+                    .unwrap_or(true)
+                {
+                    bail!(
+                        "출력은 .pdf 만 가능: {} (예: 워크스페이스 안의 문서모음.pdf)",
+                        p.display()
+                    );
+                }
+                p
+            }
+            // 생략 시 워크스페이스에 비충돌 이름으로 자동 저장 — 출력 경로 실수 원천 차단
+            None => default_output_path(&ctx.workspace()),
+        };
         if output.exists() {
             bail!(
                 "대상이 이미 존재함: {} (다른 output_path 지정)",
@@ -428,6 +491,116 @@ mod tests {
         assert!(msg.contains("2페이지"), "{msg}");
         let doc = Document::load(&out).unwrap();
         assert_eq!(doc.get_pages().len(), 2);
+    }
+
+    /// dir 인자만으로 폴더의 이미지 전체가 묶여야 한다 (이미지 아닌 파일은 제외)
+    #[test]
+    fn dir_argument_bundles_all_images() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        write_png(&dir.path().join("b.png"), 16, 16);
+        write_png(&dir.path().join("a.png"), 16, 16);
+        std::fs::write(dir.path().join("note.txt"), "not an image").unwrap();
+        let out = dir.path().join("out.pdf");
+
+        let msg = ImagesToPdf
+            .execute(
+                &json!({
+                    "dir": dir.path().to_string_lossy(),
+                    "output_path": out.to_string_lossy()
+                }),
+                &ctx,
+            )
+            .unwrap();
+        assert!(msg.contains("2페이지"), "{msg}");
+        assert_eq!(Document::load(&out).unwrap().get_pages().len(), 2);
+    }
+
+    /// output_path 생략 → 워크스페이스에 자동 이름, 재호출 시 비충돌 이름
+    #[test]
+    fn omitted_output_path_defaults_into_workspace() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        write_png(&dir.path().join("a.png"), 8, 8);
+
+        let msg = ImagesToPdf
+            .execute(&json!({"dir": dir.path().to_string_lossy()}), &ctx)
+            .unwrap();
+        assert!(msg.contains("images.pdf"), "{msg}");
+        assert!(dir.path().join("images.pdf").exists());
+
+        // 두 번째 호출은 기존 파일을 덮지 않고 다음 이름을 쓴다
+        // (생성된 images.pdf 가 dir 스캔에 섞이지 않는 것도 함께 검증 — pdf 는 이미지 아님)
+        let msg2 = ImagesToPdf
+            .execute(&json!({"dir": dir.path().to_string_lossy()}), &ctx)
+            .unwrap();
+        assert!(msg2.contains("images_2.pdf"), "{msg2}");
+        assert!(dir.path().join("images_2.pdf").exists());
+    }
+
+    /// 확장자 없는 출력 경로(폴더 모양 실수)는 .pdf 로 보정된다
+    #[test]
+    fn extensionless_output_path_gets_pdf_appended() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        write_png(&dir.path().join("a.png"), 8, 8);
+        let out_no_ext = dir.path().join("묶음");
+
+        let msg = ImagesToPdf
+            .execute(
+                &json!({
+                    "dir": dir.path().to_string_lossy(),
+                    "output_path": out_no_ext.to_string_lossy()
+                }),
+                &ctx,
+            )
+            .unwrap();
+        assert!(msg.contains("묶음.pdf"), "{msg}");
+        assert!(dir.path().join("묶음.pdf").exists());
+    }
+
+    #[test]
+    fn collect_images_is_name_sorted_and_filtered() {
+        let dir = tempdir().unwrap();
+        write_png(&dir.path().join("b.png"), 8, 8);
+        write_png(&dir.path().join("a.png"), 8, 8);
+        std::fs::write(dir.path().join("c.gif"), b"x").unwrap(); // 미지원 확장자 제외
+        let found = collect_images_sorted(dir.path()).unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.png", "b.png"]);
+    }
+
+    #[test]
+    fn missing_dir_and_paths_mentions_both_options() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let err = ImagesToPdf
+            .execute(
+                &json!({"output_path": dir.path().join("o.pdf").to_string_lossy()}),
+                &ctx,
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("dir") && msg.contains("paths"), "{msg}");
+    }
+
+    #[test]
+    fn empty_dir_reports_no_images() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let err = ImagesToPdf
+            .execute(
+                &json!({
+                    "dir": dir.path().to_string_lossy(),
+                    "output_path": dir.path().join("o.pdf").to_string_lossy()
+                }),
+                &ctx,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("이미지가 없음"), "{err}");
     }
 
     #[test]
