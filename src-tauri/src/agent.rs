@@ -41,6 +41,8 @@ pub async fn run_turn(
 ) -> Result<()> {
     let started = Instant::now();
     let tools = registry.schemas();
+    // 같은 (도구, 인자) 반복 차단 — 작은 모델의 루프 + 컨텍스트 낭비 방지
+    let mut executed: std::collections::HashSet<(String, String)> = Default::default();
 
     for round in 0..=max_tool_rounds {
         if cancel.load(Ordering::Relaxed) {
@@ -62,7 +64,18 @@ pub async fn run_turn(
             // false 반환 시 클라이언트가 스트림을 끊는다 — 생성 중에도 ■ 버튼이 즉시 듣게
             !cancel.load(Ordering::Relaxed)
         };
-        let result = client.complete(messages, &tools, temperature, &mut sink).await?;
+        let result = match client.complete(messages, &tools, temperature, &mut sink).await {
+            Ok(r) => r,
+            // 컨텍스트 초과: 오래된 도구 결과를 압축하고 한 번 더 시도
+            Err(e) if e.to_string().contains("exceed") && e.to_string().contains("context") => {
+                let compacted = compact_old_tool_results(messages);
+                if compacted == 0 {
+                    return Err(e);
+                }
+                client.complete(messages, &tools, temperature, &mut sink).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         let content = if result.content.is_empty() { None } else { Some(result.content.clone()) };
         let tool_calls = if result.tool_calls.is_empty() { None } else { Some(result.tool_calls.clone()) };
@@ -91,14 +104,18 @@ pub async fn run_turn(
                 arguments: call.function.arguments.clone(),
             });
 
-            let args: Value = serde_json::from_str(&call.function.arguments)
-                .unwrap_or(Value::Object(Default::default()));
-            // 도구는 동기 구현 — 블로킹 실행을 런타임에 알린다
-            let output = tokio::task::block_in_place(|| registry.execute(&call.function.name, &args));
-
-            let (ok, text) = match output {
-                Ok(t) => (true, t),
-                Err(e) => (false, format!("오류: {e:#}")),
+            let key = (call.function.name.clone(), call.function.arguments.trim().to_string());
+            let (ok, text) = if !executed.insert(key) {
+                (false, "이미 같은 인자로 호출한 도구입니다. 위의 기존 결과를 사용하거나 다른 행동을 취하세요.".to_string())
+            } else {
+                let args: Value = serde_json::from_str(&call.function.arguments)
+                    .unwrap_or(Value::Object(Default::default()));
+                // 도구는 동기 구현 — 블로킹 실행을 런타임에 알린다
+                let output = tokio::task::block_in_place(|| registry.execute(&call.function.name, &args));
+                match output {
+                    Ok(t) => (true, t),
+                    Err(e) => (false, format!("오류: {e:#}")),
+                }
             };
             emit(AgentEvent::ToolCallEnd {
                 session_id: session_id.to_string(),
@@ -107,7 +124,7 @@ pub async fn run_turn(
                 ok,
                 result: clip(&text, 2000),
             });
-            messages.push(ChatMessage::tool(call.id.clone(), clip(&text, 8000)));
+            messages.push(ChatMessage::tool(call.id.clone(), clip(&text, 4000)));
         }
     }
 
@@ -126,6 +143,32 @@ fn clip(s: &str, max_chars: usize) -> String {
     format!("{cut}\n...(잘림)")
 }
 
+/// 마지막 2개를 제외한 도구 결과 메시지를 짧게 압축한다. 압축한 개수를 돌려준다.
+/// (컨텍스트 초과 회복용 — 최근 결과는 모델이 아직 참조 중일 수 있어 보존)
+fn compact_old_tool_results(messages: &mut [ChatMessage]) -> usize {
+    const KEEP_RECENT: usize = 2;
+    const COMPACT_TO: usize = 300;
+    let tool_idxs: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "tool")
+        .map(|(i, _)| i)
+        .collect();
+    let mut compacted = 0;
+    for &i in tool_idxs.iter().rev().skip(KEEP_RECENT) {
+        if let Some(content) = &messages[i].content {
+            if content.chars().count() > COMPACT_TO {
+                messages[i].content = Some(format!(
+                    "{}\n...(컨텍스트 절약을 위해 축약됨)",
+                    content.chars().take(COMPACT_TO).collect::<String>()
+                ));
+                compacted += 1;
+            }
+        }
+    }
+    compacted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,9 +176,15 @@ mod tests {
     use crate::models::{CompletionResult, FunctionCall, ToolCall};
     use std::sync::Mutex;
 
-    /// 호출 순서대로 미리 준비한 응답을 돌려주는 mock
+    /// 호출 순서대로 미리 준비한 응답(또는 오류)을 돌려주는 mock
     struct MockClient {
-        responses: Mutex<Vec<CompletionResult>>,
+        responses: Mutex<Vec<Result<CompletionResult>>>,
+    }
+
+    impl MockClient {
+        fn ok(responses: Vec<CompletionResult>) -> Self {
+            Self { responses: Mutex::new(responses.into_iter().map(Ok).collect()) }
+        }
     }
 
     #[async_trait::async_trait]
@@ -147,7 +196,7 @@ mod tests {
             _temperature: f32,
             sink: DeltaSink<'_>,
         ) -> Result<CompletionResult> {
-            let r = self.responses.lock().unwrap().remove(0);
+            let r = self.responses.lock().unwrap().remove(0)?;
             if !r.content.is_empty() {
                 sink(DeltaKind::Text, &r.content);
             }
@@ -173,12 +222,10 @@ mod tests {
         let file = dir.path().join("hello.txt");
         std::fs::write(&file, "안녕하세요").unwrap();
 
-        let client = MockClient {
-            responses: Mutex::new(vec![
-                tool_call_result("read_file", serde_json::json!({"path": file.to_string_lossy()})),
-                CompletionResult { content: "파일 내용은 '안녕하세요' 입니다.".into(), ..Default::default() },
-            ]),
-        };
+        let client = MockClient::ok(vec![
+            tool_call_result("read_file", serde_json::json!({"path": file.to_string_lossy()})),
+            CompletionResult { content: "파일 내용은 '안녕하세요' 입니다.".into(), ..Default::default() },
+        ]);
         let registry = ToolRegistry::with_default_tools();
         let mut messages = vec![ChatMessage::system(system_prompt()), ChatMessage::user("hello.txt 읽어줘")];
         let events = Mutex::new(Vec::new());
@@ -215,12 +262,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn tool_failure_is_fed_back_to_model() {
-        let client = MockClient {
-            responses: Mutex::new(vec![
-                tool_call_result("read_file", serde_json::json!({"path": "C:\\없는파일.txt"})),
-                CompletionResult { content: "파일을 찾을 수 없습니다.".into(), ..Default::default() },
-            ]),
-        };
+        let client = MockClient::ok(vec![
+            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는파일.txt"})),
+            CompletionResult { content: "파일을 찾을 수 없습니다.".into(), ..Default::default() },
+        ]);
         let registry = ToolRegistry::with_default_tools();
         let mut messages = vec![ChatMessage::user("읽어줘")];
         let cancel = AtomicBool::new(false);
@@ -238,7 +283,7 @@ mod tests {
         let responses: Vec<CompletionResult> = (0..10)
             .map(|_| tool_call_result("list_dir", serde_json::json!({"path": "C:\\"})))
             .collect();
-        let client = MockClient { responses: Mutex::new(responses) };
+        let client = MockClient::ok(responses);
         let registry = ToolRegistry::with_default_tools();
         let mut messages = vec![ChatMessage::user("loop")];
         let events = Mutex::new(Vec::new());
@@ -252,5 +297,74 @@ mod tests {
 
         let evs = events.lock().unwrap();
         assert!(evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+    }
+
+    /// 같은 (도구, 인자) 재호출은 실행하지 않고 모델에 안내 메시지를 돌려준다
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_tool_call_is_short_circuited() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+        let args = serde_json::json!({"path": dir.path().to_string_lossy()});
+
+        let client = MockClient::ok(vec![
+            tool_call_result("list_dir", args.clone()),
+            tool_call_result("list_dir", args.clone()), // 동일 호출 반복
+            CompletionResult { content: "끝".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("목록")];
+        let events = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &mut messages, "s1", 8, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        let oks = evs.iter().filter(|e| matches!(e, AgentEvent::ToolCallEnd { ok: true, .. })).count();
+        let errs = evs.iter().filter(|e| matches!(e, AgentEvent::ToolCallEnd { ok: false, .. })).count();
+        assert_eq!((oks, errs), (1, 1), "두 번째 호출은 실행 없이 거부돼야 함");
+        assert!(messages.iter().any(|m| m.role == "tool"
+            && m.content.as_deref().unwrap().contains("이미 같은 인자")));
+    }
+
+    /// 컨텍스트 초과 오류가 나면 오래된 도구 결과를 압축하고 재시도한다
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_overflow_compacts_and_retries() {
+        let long = "가".repeat(5000);
+        let client = MockClient {
+            responses: Mutex::new(vec![
+                Err(anyhow::anyhow!(
+                    "llama-server 오류 400: request exceeds the available context size"
+                )),
+                Ok(CompletionResult { content: "회복됨".into(), ..Default::default() }),
+            ]),
+        };
+        let registry = ToolRegistry::with_default_tools();
+        // 압축 대상이 되도록 긴 도구 결과 3개를 히스토리에 심는다
+        let mut messages = vec![
+            ChatMessage::user("이전 질문"),
+            ChatMessage::tool("c1", long.clone()),
+            ChatMessage::tool("c2", long.clone()),
+            ChatMessage::tool("c3", long.clone()),
+            ChatMessage::user("다음 질문"),
+        ];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .expect("압축 후 재시도로 회복해야 함");
+
+        assert!(messages[1].content.as_deref().unwrap().contains("축약됨"), "가장 오래된 결과가 압축돼야 함");
+        assert!(!messages[3].content.as_deref().unwrap().contains("축약됨"), "최근 2개는 보존");
+        assert_eq!(messages.last().unwrap().content.as_deref(), Some("회복됨"));
+    }
+
+    #[test]
+    fn compact_skips_when_nothing_to_compact() {
+        let mut messages = vec![ChatMessage::user("짧음"), ChatMessage::tool("c1", "짧은 결과")];
+        assert_eq!(compact_old_tool_results(&mut messages), 0);
     }
 }

@@ -5,7 +5,8 @@ use std::fs;
 use std::path::Path;
 
 const MAX_READ_BYTES: u64 = 64 * 1024;
-const MAX_LIST_ENTRIES: usize = 200;
+// 컨텍스트 예산 보호: 도구 결과가 LLM 컨텍스트에 그대로 들어간다
+const MAX_LIST_ENTRIES: usize = 100;
 
 pub struct ListDir;
 
@@ -28,8 +29,13 @@ impl Tool for ListDir {
     fn execute(&self, args: &Value) -> Result<String> {
         let path = req_str(args, "path")?;
         let mut lines = Vec::new();
+        let mut total = 0usize;
         let entries = fs::read_dir(path).with_context(|| format!("디렉토리 열기 실패: {path}"))?;
-        for entry in entries.flatten().take(MAX_LIST_ENTRIES) {
+        for entry in entries.flatten() {
+            total += 1;
+            if lines.len() >= MAX_LIST_ENTRIES {
+                continue; // 전체 개수는 계속 센다
+            }
             let meta = entry.metadata();
             let kind = if entry.path().is_dir() { "dir" } else { "file" };
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -46,7 +52,11 @@ impl Tool for ListDir {
         if lines.is_empty() {
             return Ok("(빈 디렉토리)".into());
         }
-        Ok(format!("type\tsize\tmodified\tname\n{}", lines.join("\n")))
+        let mut out = format!("type\tsize\tmodified\tname\n{}", lines.join("\n"));
+        if total > lines.len() {
+            out.push_str(&format!("\n...(총 {total}개 중 {}개만 표시)", lines.len()));
+        }
+        Ok(out)
     }
 }
 

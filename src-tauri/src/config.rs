@@ -32,7 +32,8 @@ impl Default for AppConfig {
             port: 8736,
             device: "Vulkan0".into(),
             n_gpu_layers: 99,
-            ctx_size: 8192,
+            // iGPU 공유메모리 여유가 크고(~18GB) 2B 모델 KV 캐시가 작아 16K 가 안전
+            ctx_size: 16384,
             max_tool_rounds: 8,
             // 툴콜 인자 JSON 안정성 우선 (높을수록 무이스케이프 경로 등 미스생성 증가)
             temperature: 0.4,

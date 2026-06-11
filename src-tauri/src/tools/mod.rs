@@ -1,3 +1,4 @@
+mod archive;
 mod capture;
 mod fs_tools;
 mod image_tools;
@@ -35,6 +36,8 @@ impl ToolRegistry {
                 Box::new(image_tools::ImageTransform),
                 Box::new(pdf_tools::PdfExtractText),
                 Box::new(capture::ScreenCapture),
+                Box::new(archive::ZipCreate),
+                Box::new(archive::ZipExtract),
             ],
         }
     }
