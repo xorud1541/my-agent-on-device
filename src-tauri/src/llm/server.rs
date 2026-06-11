@@ -35,6 +35,7 @@ impl LlamaServer {
             "-c", &cfg.ctx_size.to_string(),
             "--jinja",
             "--no-webui",
+            "--reasoning-budget", &cfg.reasoning_budget.to_string(),
         ]);
         #[cfg(windows)]
         {

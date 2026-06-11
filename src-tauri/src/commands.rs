@@ -34,7 +34,8 @@ pub async fn set_config(app: AppHandle, new_config: AppConfig) -> Result<(), Str
             || cfg.port != new_config.port
             || cfg.device != new_config.device
             || cfg.n_gpu_layers != new_config.n_gpu_layers
-            || cfg.ctx_size != new_config.ctx_size;
+            || cfg.ctx_size != new_config.ctx_size
+            || cfg.reasoning_budget != new_config.reasoning_budget;
         *cfg = new_config;
         cfg.save().map_err(|e| e.to_string())?;
         changed

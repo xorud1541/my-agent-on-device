@@ -52,6 +52,7 @@ export interface AppConfig {
   max_tool_rounds: number;
   temperature: number;
   max_output_tokens: number;
+  reasoning_budget: number;
 }
 
 export type ServerStatus = { status: "loading" | "ready" | "down"; detail: string };

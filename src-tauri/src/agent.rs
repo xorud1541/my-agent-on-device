@@ -77,6 +77,15 @@ pub async fn run_turn(
             Err(e) => return Err(e),
         };
 
+        // 사고만 하다 토큰을 소진하면 본문도 툴콜도 없다 — 빈 턴 대신 사용자에게 알린다
+        if result.content.is_empty() && result.tool_calls.is_empty() {
+            emit(AgentEvent::Error {
+                session_id: session_id.to_string(),
+                message: "모델이 응답을 완성하지 못했습니다 (출력 한도 내 사고 초과). 질문을 더 구체적으로 하거나 설정에서 출력 토큰을 늘려보세요.".into(),
+            });
+            break;
+        }
+
         let content = if result.content.is_empty() { None } else { Some(result.content.clone()) };
         let tool_calls = if result.tool_calls.is_empty() { None } else { Some(result.tool_calls.clone()) };
         messages.push(ChatMessage::assistant(content, tool_calls));
@@ -360,6 +369,26 @@ mod tests {
         assert!(messages[1].content.as_deref().unwrap().contains("축약됨"), "가장 오래된 결과가 압축돼야 함");
         assert!(!messages[3].content.as_deref().unwrap().contains("축약됨"), "최근 2개는 보존");
         assert_eq!(messages.last().unwrap().content.as_deref(), Some("회복됨"));
+    }
+
+    /// 본문도 툴콜도 없는 빈 완성은 사용자에게 오류로 알린다
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_completion_surfaces_error() {
+        let client = MockClient::ok(vec![CompletionResult::default()]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("질문")];
+        let events = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &mut messages, "s1", 8, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        assert!(evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+        assert!(evs.iter().any(|e| matches!(e, AgentEvent::TurnEnd { .. })));
     }
 
     #[test]
