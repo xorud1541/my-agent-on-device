@@ -189,6 +189,11 @@ const DIGEST_MAX_CHARS: usize = 1600;
 /// 않으며 절대 상한은 hard_cap(= max_tool_rounds × HARD_CAP_FACTOR)이 담당한다.
 const MAX_REJECTED_ROUNDS: u32 = 2;
 
+/// 파일시스템 상태를 바꾸지 않는 읽기 전용 도구들. 쓰기 도구가 성공하면 이 도구들의
+/// 중복 호출 기록을 무효화한다 — 상태가 바뀐 뒤의 같은 인자 재조회는 중복이 아니라
+/// 검증이다 (2026-06-12 실로그: delete ×3 후 list_dir 재확인이 중복 차단됨).
+const READ_ONLY_TOOLS: &[&str] = &["list_dir", "search_files", "read_file", "image_info", "pdf_extract_text"];
+
 /// 성공이 이어지는 턴에 허용하는 절대 라운드 상한 배수 (폭주 백스톱).
 /// 실로그(2026-06-12): 8회 전부 성공하며 일하던 턴이 고정 한도에 잘림 → 성공은 계속
 /// 허용하되, 완료 후에도 멈추지 않는 폭주(적대 S5-t3)는 이 상한이 막는다.
@@ -513,6 +518,11 @@ pub async fn run_turn(
                 }
             };
             any_success |= ok;
+            // 쓰기 도구 성공 = 상태 변화 → 읽기 도구의 중복 기록/루프 숨김을 풀어준다
+            if ok && !READ_ONLY_TOOLS.contains(&call.function.name.as_str()) {
+                executed.retain(|(n, _)| !READ_ONLY_TOOLS.contains(&n.as_str()));
+                looping_tools.retain(|n| !READ_ONLY_TOOLS.contains(&n.as_str()));
+            }
             emit(AgentEvent::ToolCallEnd {
                 session_id: session_id.to_string(),
                 call_id: call.id.clone(),
@@ -885,6 +895,44 @@ mod tests {
             last.content.as_deref().unwrap_or("").contains("완료되지 않"),
             "미완 명시 없음: {:?}",
             last.content
+        );
+    }
+
+    /// 쓰기 도구가 성공하면 읽기 도구의 중복 기록을 무효화한다 — 상태가 바뀌었으니
+    /// 같은 인자의 재조회는 중복이 아니라 검증이다.
+    /// (2026-06-12 실로그: delete ×3 후 list_dir 재확인이 중복 차단돼 남은 파일을
+    ///  못 보고 환각 파일명으로 삭제 시도 → 조기중단)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mutation_invalidates_read_tool_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("x.txt");
+        std::fs::write(&file, "x").unwrap();
+        let dir_args = serde_json::json!({"path": dir.path().to_string_lossy()});
+        let client = MockClient::ok(vec![
+            tool_call_result("list_dir", dir_args.clone()),
+            tool_call_result("delete_path", serde_json::json!({"path": file.to_string_lossy()})),
+            // 삭제 후 같은 인자의 재조회 — 신선한 결과로 실행돼야 한다
+            tool_call_result("list_dir", dir_args.clone()),
+            CompletionResult { content: "정리 완료, 폴더가 비었습니다.".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("x.txt 지우고 확인해줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        assert!(
+            !messages.iter().any(|m| m
+                .content
+                .as_deref()
+                .is_some_and(|c| c.contains("이미 같은 인자"))),
+            "변이 후 재조회가 중복으로 거절됨"
+        );
+        assert_eq!(
+            messages.last().unwrap().content.as_deref(),
+            Some("정리 완료, 폴더가 비었습니다.")
         );
     }
 
