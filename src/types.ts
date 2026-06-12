@@ -26,6 +26,8 @@ export type Segment =
 export interface UserMessage {
   role: "user";
   text: string;
+  /** 첨부 이미지(썸네일 data URL + 캐시 경로). 복원 시 thumb 가 빈 문자열이면 플레이스홀더 */
+  images?: { path: string; thumb: string }[];
 }
 
 export interface AssistantMessage {
@@ -43,6 +45,7 @@ export interface ChatMessage {
   content?: string | null;
   tool_calls?: { id: string; type: string; function: { name: string; arguments: string } }[] | null;
   tool_call_id?: string | null;
+  images?: string[] | null;
 }
 
 // 백엔드 sessions::SessionMeta 와 1:1 대응
@@ -75,6 +78,7 @@ export interface AppConfig {
   user_name: string;
   agent_name: string;
   removebg_model: string;
+  mmproj_path: string;
 }
 
 export type ServerStatus = { status: "loading" | "ready" | "down"; detail: string };

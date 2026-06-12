@@ -146,12 +146,20 @@ export function useAgent() {
   }, []);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, attachments: { path: string; thumb: string }[] = []) => {
       const sessionId = await ensureSession();
-      setMessages((prev) => [...prev, { role: "user", text }, { role: "assistant", segments: [] }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", text, images: attachments.length ? attachments : undefined },
+        { role: "assistant", segments: [] },
+      ]);
       setBusy(true);
       try {
-        await invoke("send_message", { sessionId, text });
+        await invoke("send_message", {
+          sessionId,
+          text,
+          attachments: attachments.map((a) => a.path),
+        });
       } catch (e) {
         patchAssistant((m) => ({
           ...m,
