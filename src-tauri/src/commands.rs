@@ -223,7 +223,7 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
             emit_event(&app3, ev);
         };
 
-        // 도구가 설정을 바꾸면(set_workspace/update_profile) 저장하고 UI 로 방송한다
+        // 도구가 설정을 바꾸면(set_workspace) 저장하고 UI 로 방송한다
         let config = app2.state::<AppState>().config.clone();
         let notify_app = app2.clone();
         let tool_ctx = crate::tools::ToolCtx::new(

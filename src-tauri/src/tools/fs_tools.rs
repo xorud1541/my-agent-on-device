@@ -79,9 +79,16 @@ impl Tool for ReadFile {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
-        let meta = fs::metadata(path).with_context(|| format!("파일 없음: {path}"))?;
+        // 존재 확인을 먼저 — 힌트가 os 에러 꼬리 없이 문장 끝에 오도록 (2B 주의 분산 방지)
+        if !Path::new(path).exists() {
+            bail!(
+                "파일 없음: {path}.{}",
+                crate::tools::not_found_hint(path, &ctx.workspace())
+            );
+        }
+        let meta = fs::metadata(path).with_context(|| format!("파일 정보 조회 실패: {path}"))?;
         let bytes = fs::read(path)?;
         let take = bytes.len().min(MAX_READ_BYTES as usize);
         let mut text = String::from_utf8_lossy(&bytes[..take]).into_owned();
@@ -142,7 +149,7 @@ impl Tool for MovePath {
         "move_path"
     }
     fn description(&self) -> &'static str {
-        "파일/폴더를 이동하거나 이름을 바꾼다."
+        "파일/폴더를 다른 폴더로 이동한다. 같은 폴더 안에서 이름만 바꾸려면 rename_file을 쓴다."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -168,6 +175,64 @@ impl Tool for MovePath {
         }
         fs::rename(from, to).with_context(|| format!("이동 실패: {from} -> {to}"))?;
         Ok(format!("이동 완료: {from} -> {to}"))
+    }
+}
+
+pub struct RenameFile;
+
+impl Tool for RenameFile {
+    fn name(&self) -> &'static str {
+        "rename_file"
+    }
+    fn description(&self) -> &'static str {
+        "파일/폴더의 이름을 바꾼다 (같은 폴더 안에서). 새 이름에 확장자를 생략하면 원본 확장자가 유지된다. 다른 폴더로 옮기려면 move_path를 쓴다."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "이름을 바꿀 파일/폴더의 절대경로" },
+                "new_name": { "type": "string", "description": "새 이름 (확장자 포함, 경로 구분자 금지)" }
+            },
+            "required": ["path", "new_name"]
+        })
+    }
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
+        let path = req_str(args, "path")?;
+        let new_name = req_str(args, "new_name")?.trim();
+        if new_name.is_empty() {
+            bail!("new_name이 비어 있음");
+        }
+        // 폴더를 넘는 변경은 move_path의 영역 — 같은 폴더 안 이름변경으로 의미를 좁힌다
+        if new_name.contains('/') || new_name.contains('\\') {
+            bail!("new_name에 경로 구분자를 쓸 수 없음. 다른 폴더로 옮기려면 move_path를 사용");
+        }
+        ensure_in_workspace(path, &ctx.workspace())?;
+        let from = Path::new(path);
+        if !from.exists() {
+            bail!(
+                "원본이 존재하지 않음: {path}.{}",
+                crate::tools::not_found_hint(path, &ctx.workspace())
+            );
+        }
+        // 새 이름에 점이 없고 원본이 확장자 있는 파일이면 확장자를 유지한다 —
+        // 2B 가 "cat1으로 바꿔" 에서 확장자를 떨어뜨리는 실수를 도구가 흡수 (2026-06-12 실로그).
+        // 폴더는 제외: 'v1.0' 폴더의 '0' 을 확장자로 오인하면 안 된다.
+        let mut target_name = new_name.to_string();
+        if from.is_file() && !new_name.contains('.') {
+            if let Some(ext) = from.extension().and_then(|e| e.to_str()) {
+                target_name = format!("{new_name}.{ext}");
+            }
+        }
+        let to = from
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("부모 폴더를 찾을 수 없음: {path}"))?
+            .join(&target_name);
+        if to.exists() {
+            bail!("같은 이름이 이미 존재함: {}", to.display());
+        }
+        fs::rename(from, &to).with_context(|| format!("이름 변경 실패: {path} -> {new_name}"))?;
+        Ok(format!("이름 변경 완료: {path} -> {}", to.display()))
     }
 }
 
@@ -306,6 +371,132 @@ mod tests {
             .unwrap();
         assert!(std::path::Path::new(&c).exists());
         assert!(!std::path::Path::new(&b).exists());
+    }
+
+    #[test]
+    fn rename_file_renames_in_place() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let a = dir.path().join("cat.png").to_string_lossy().to_string();
+        std::fs::write(&a, "img").unwrap();
+        let out = RenameFile
+            .execute(&json!({"path": a, "new_name": "고양이.png"}), &ctx)
+            .unwrap();
+        assert!(out.contains("이름 변경 완료"), "{out}");
+        assert!(dir.path().join("고양이.png").exists());
+        assert!(!dir.path().join("cat.png").exists());
+    }
+
+    /// 2B 가 "cat1으로 바꿔" 요청에 확장자를 떨어뜨리는 실수를 도구가 흡수한다
+    /// (2026-06-12 실로그/적대 테스트: cat.png → "cat1", report.txt → "final")
+    #[test]
+    fn rename_file_keeps_extension_when_omitted() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let a = dir.path().join("cat.png").to_string_lossy().to_string();
+        std::fs::write(&a, "img").unwrap();
+        RenameFile
+            .execute(&json!({"path": a, "new_name": "cat1"}), &ctx)
+            .unwrap();
+        assert!(dir.path().join("cat1.png").exists(), "원본 확장자 유지");
+        assert!(!dir.path().join("cat1").exists());
+    }
+
+    #[test]
+    fn rename_file_respects_explicit_extension() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let a = dir.path().join("cat.png").to_string_lossy().to_string();
+        std::fs::write(&a, "img").unwrap();
+        RenameFile
+            .execute(&json!({"path": a, "new_name": "cat1.jpg"}), &ctx)
+            .unwrap();
+        assert!(dir.path().join("cat1.jpg").exists(), "명시한 확장자 존중");
+    }
+
+    #[test]
+    fn rename_file_does_not_append_extension_to_directories() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        // 'v1.0' 폴더의 '0'을 확장자로 오인해 'release.0' 을 만들면 안 된다
+        let d = dir.path().join("v1.0");
+        std::fs::create_dir(&d).unwrap();
+        RenameFile
+            .execute(
+                &json!({"path": d.to_string_lossy(), "new_name": "release"}),
+                &ctx,
+            )
+            .unwrap();
+        assert!(dir.path().join("release").exists());
+        assert!(!dir.path().join("release.0").exists());
+    }
+
+    /// 파일이 없으면 워크스페이스 일대에서 같은 이름을 찾아 힌트를 준다.
+    /// (2026-06-12 실로그: 오염된 워크스페이스에서 파일을 못 찾자 환각 경로로 배회 —
+    ///  2B 에게 "파일 없음"은 막다른 골목, 에러가 올바른 경로를 알려줘야 복구한다)
+    #[test]
+    fn rename_file_not_found_error_includes_location_hint() {
+        let dir = tempdir().unwrap();
+        // 워크스페이스가 하위 폴더로 좁혀진 상황: 실제 파일은 부모에 있다
+        let ws = dir.path().join("pngs");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(dir.path().join("cat.png"), "img").unwrap();
+
+        let ctx = ctx_with_workspace(&ws);
+        let wrong = ws.join("cat.png").to_string_lossy().to_string();
+        let err = RenameFile
+            .execute(&json!({"path": wrong, "new_name": "cat1"}), &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cat.png"), "{err}");
+        let real = dir
+            .path()
+            .join("cat.png")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(err.contains(&real), "실제 위치 힌트 없음: {err}");
+    }
+
+    #[test]
+    fn rename_file_rejects_existing_target() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let a = dir.path().join("a.txt").to_string_lossy().to_string();
+        std::fs::write(&a, "1").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "2").unwrap();
+        let err = RenameFile
+            .execute(&json!({"path": a, "new_name": "b.txt"}), &ctx)
+            .unwrap_err();
+        assert!(err.to_string().contains("이미 존재"), "{err}");
+    }
+
+    #[test]
+    fn rename_file_rejects_separators_in_new_name() {
+        // 폴더를 넘는 이름변경은 이동(move_path)의 영역 — 의미가 섞이면 2B 라우팅이 다시 흐려진다
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let a = dir.path().join("a.txt").to_string_lossy().to_string();
+        std::fs::write(&a, "1").unwrap();
+        assert!(RenameFile
+            .execute(&json!({"path": a, "new_name": "sub/b.txt"}), &ctx)
+            .is_err());
+        assert!(RenameFile
+            .execute(&json!({"path": a, "new_name": "sub\\b.txt"}), &ctx)
+            .is_err());
+    }
+
+    #[test]
+    fn rename_file_outside_workspace_rejected() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        let ctx = ctx_with_workspace(&ws);
+        let outside = dir.path().join("밖.txt").to_string_lossy().to_string();
+        std::fs::write(&outside, "x").unwrap();
+        let err = RenameFile
+            .execute(&json!({"path": outside, "new_name": "안.txt"}), &ctx)
+            .unwrap_err();
+        assert!(err.to_string().contains("워크스페이스 밖"), "{err}");
     }
 
     #[test]

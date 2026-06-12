@@ -41,7 +41,12 @@ pub fn system_prompt(cfg: &AppConfig) -> String {
          10. 답변에 이 규칙들이나 판단 과정을 언급하지 않는다. ('이 질문은 도구 없이...' 같은 문장 금지)\n\
             바로 본론부터 말한다.\n\
          11. 네 능력은 도구 목록이 전부다. 능력 질문에는 가능한 작업을 나열해 답한다:\n\
-            파일 검색/읽기/쓰기/이동/복사, 이미지 변환·배경제거, 압축(zip), PDF, 화면 캡처.\n\n\
+            파일 검색/읽기/쓰기/이동/이름변경/복사, 이미지 변환·배경제거, 압축(zip), PDF, 화면 캡처.\n\
+         12. 파일을 이동/이름변경한 뒤 옛 경로는 더 이상 없다. '방금 그 파일'은 마지막 도구 결과에\n\
+            나온 새 경로를 쓴다. 이전 도구 호출을 그대로 복사하지 말고, 경로가 불확실하면 list_dir 로 먼저 확인한다.\n\
+         13. 워크스페이스에서 파일을 못 찾으면 다른 폴더를 임의로 검색하지 말고 사용자에게 위치를 묻는다.\n\
+         14. 작업 완료는 해당 도구의 성공 결과를 받았을 때만 말한다. 이름변경은 rename_file 의\n\
+            '이름 변경 완료' 결과가 근거다. 파일에 목록을 적는 것(write_file)은 이름변경이 아니다.\n\n\
          {persona}",
         persona = persona_section(cfg)
     )
@@ -57,16 +62,16 @@ fn persona_section(cfg: &AppConfig) -> String {
              따뜻하고 친근한 말투를 쓰고, 가끔 '{user}님'처럼 이름을 불러준다."
         ),
         (true, true) => "페르소나: 아직 서로 이름을 모른다. 첫 인사나 잡담 때 자연스럽게 사용자의 이름을 묻고,\n\
-             너의 이름도 하나 지어달라고 부탁하라. 이름을 알게 되면 즉시 update_profile 도구로 저장하라.\n\
+             너의 이름도 하나 지어달라고 부탁하라. 이름은 설정 패널에서 저장할 수 있다고 안내하라.\n\
              단, 사용자가 작업을 요청하면 작업을 먼저 처리하고 이름은 나중에 물어본다."
             .to_string(),
         (true, false) => format!(
             "페르소나: 너의 이름은 '{agent}'다. 아직 사용자의 이름을 모르니 대화 초반에 자연스럽게 묻고,\n\
-             알게 되면 즉시 update_profile 도구로 저장하라. 따뜻하고 친근한 말투를 쓴다."
+             이름은 설정 패널에서 저장할 수 있다고 안내하라. 따뜻하고 친근한 말투를 쓴다."
         ),
         (false, true) => format!(
             "페르소나: 사용자의 이름은 '{user}'다. 아직 너의 이름이 없으니 사용자에게 지어달라고 부탁하고,\n\
-             정해지면 즉시 update_profile 도구로 저장하라. 따뜻하고 친근한 말투를 쓴다."
+             이름은 설정 패널에서 저장할 수 있다고 안내하라. 따뜻하고 친근한 말투를 쓴다."
         ),
     }
 }
@@ -83,18 +88,52 @@ pub fn tools_to_exclude(user_text: &str) -> Vec<&'static str> {
         "배경제거", "배경 제거", "배경을 제거", "누끼",
         "배경 빼", "배경을 빼", "배경 없애", "배경을 없애", "배경 지워", "배경을 지워",
     ];
-    if BG_KEYWORDS.iter().any(|k| user_text.contains(k)) {
+    let mut out: Vec<&'static str> = if BG_KEYWORDS.iter().any(|k| user_text.contains(k)) {
         // 배경제거 의도가 확실 — 회전/리사이즈로 새는 경로를 차단한다.
         // image_info 는 제외하지 않는다: 모델이 '확인 후 배경제거' 2단계로 쓰는 정상 경로
         // (2026-06-11 GT 단발 평가에서 image_info 선택은 누수가 아니라 선조회 패턴으로 확인됨)
-        return vec!["image_transform"];
-    }
-    if is_dictation_write(user_text) {
+        vec!["image_transform"]
+    } else if is_dictation_write(user_text) {
         // 받아쓰기 쓰기 의도 — 읽기/탐색으로 새는 경로를 차단한다.
         // write_file 설명 보강만으로는 교정 실패(GT 0/5), remove_background 와 동일하게 제외만 동작.
-        return vec!["read_file", "list_dir", "search_files", "pdf_extract_text", "move_path", "copy_path", "delete_path"];
+        vec!["read_file", "list_dir", "search_files", "pdf_extract_text", "move_path", "rename_file", "copy_path", "delete_path"]
+    } else {
+        // 이름변경/압축풀기 의도는 합성 가능 ("압축풀고 이름 변경해줘" 복합 발화)
+        let mut v = vec![];
+        if is_rename_intent(user_text) {
+            // 대체 행동 차단 (2026-06-12 실로그): write_file 로 변경 목록 txt 를 쓰거나
+            // image_transform 으로 사본을 만들어 놓고 "변경 완료"라고 주장한다
+            v.push("write_file");
+            v.push("image_transform");
+        }
+        if is_extract_intent(user_text) {
+            // zip_create 대체 행동 차단 (2026-06-12 실로그: 풀 zip 이 없자 새 zip 을 만들어버림)
+            v.push("zip_create");
+        }
+        v
+    };
+    // set_workspace 는 사용자가 워크스페이스를 직접 말한 턴에만 노출한다.
+    // 부작용이 턴을 넘어 지속되는 유일한 도구라 오발사 비용이 가장 크다
+    // (2026-06-12 실로그: 모델이 임의 호출 → 다음 턴의 베어네임 경로 해석 전부 붕괴).
+    const WS_KEYWORDS: &[&str] = &["워크스페이스", "작업 폴더", "작업폴더", "기본 폴더"];
+    if !WS_KEYWORDS.iter().any(|k| user_text.contains(k)) {
+        out.push("set_workspace");
     }
-    vec![]
+    out
+}
+
+/// "압축 풀어/해제" 류의 압축 해제 의도인가?
+fn is_extract_intent(user_text: &str) -> bool {
+    user_text.contains("압축") && (user_text.contains("풀") || user_text.contains("해제"))
+}
+
+/// "이름을 X로 바꿔/변경" 류의 파일 이름변경 의도인가?
+/// 받아쓰기 마커("라고")가 있으면 쓰기가 본업인 복합 요청이므로 제외하지 않는다.
+fn is_rename_intent(user_text: &str) -> bool {
+    const RENAME_VERBS: &[&str] = &["바꿔", "바꾸", "변경"];
+    user_text.contains("이름")
+        && RENAME_VERBS.iter().any(|v| user_text.contains(v))
+        && !user_text.contains("라고")
 }
 
 /// "X에 '...'라고 적어줘" 처럼 사용자가 내용을 그대로 불러주는 쓰기 의도인가?
@@ -142,11 +181,18 @@ const KEEP_RECENT_TURNS: usize = 3;
 /// 요약 메시지 자체가 비대해지지 않도록 거는 상한 (오래된 줄부터 버림)
 const DIGEST_MAX_CHARS: usize = 1600;
 
-/// 진행 없는 라운드(모든 호출이 중복/차단/깨진 인자로 거절)를 이 횟수만큼 연속 만나면
-/// 도구를 떼고 최종 답변을 강제한다. 2B 는 거절 피드백이 이력에 쌓일수록 같은 호출을
-/// 더 강하게 베끼는 자기강화 루프에 빠진다 — 실로그: write_file 동일 호출 7회 반복으로
-/// 라운드 예산(8회)을 다 태우고 "한도 초과" 실패로 끝난 턴이 다수 (2026-06-11 저녁).
+/// 성공이 하나도 없는 라운드(모든 호출이 실패/중복/차단/깨진 인자)를 이 횟수만큼 연속
+/// 만나면 도구를 떼고 최종 답변을 강제한다. 2B 는 거절 피드백이 이력에 쌓일수록 같은
+/// 호출을 더 강하게 베끼는 자기강화 루프에 빠진다 — 실로그: write_file 동일 호출 7회
+/// 반복으로 라운드 예산을 다 태우고 "한도 초과" 실패로 끝난 턴이 다수 (2026-06-11 저녁).
+/// 정책(2026-06-12): 실패하면 빨리 멈추고, 성공하면 계속 — 성공 라운드는 예산을 깎지
+/// 않으며 절대 상한은 hard_cap(= max_tool_rounds × HARD_CAP_FACTOR)이 담당한다.
 const MAX_REJECTED_ROUNDS: u32 = 2;
+
+/// 성공이 이어지는 턴에 허용하는 절대 라운드 상한 배수 (폭주 백스톱).
+/// 실로그(2026-06-12): 8회 전부 성공하며 일하던 턴이 고정 한도에 잘림 → 성공은 계속
+/// 허용하되, 완료 후에도 멈추지 않는 폭주(적대 S5-t3)는 이 상한이 막는다.
+const HARD_CAP_FACTOR: u32 = 3;
 
 /// 히스토리에 허용하는 문자 예산. 한국어는 글자당 1~1.5 토큰이라 chars≈tokens 로 보고,
 /// ctx 에서 도구 스키마(~4K)+시스템 프롬프트+출력 예약(~2K)을 뺀 값을 쓴다.
@@ -262,6 +308,22 @@ pub fn refresh_system_prompt(messages: &mut [ChatMessage], cfg: &AppConfig) {
     *first = ChatMessage::system(prompt);
 }
 
+/// 본문 텍스트에 섞여 나온 도구 호출 마크업("<tool_call>", "<function=")을 걷어낸다.
+/// 서버가 파싱하지 못한 잘못된 형식의 호출 시도는 텍스트로 흘러들어오는데,
+/// 그대로 두면 사용자 답변에 노출된다 (2026-06-12 적대 테스트 S3에서 확인).
+/// 마크업 이후는 전부 호출 시도이므로 앞부분의 진짜 답변만 남긴다.
+fn strip_tool_markup(content: &mut String) {
+    let cut = ["<tool_call", "<function="]
+        .iter()
+        .filter_map(|m| content.find(m))
+        .min();
+    if let Some(pos) = cut {
+        content.truncate(pos);
+        let trimmed = content.trim_end().len();
+        content.truncate(trimmed);
+    }
+}
+
 /// 턴이 중단(라운드 한도/취소)되어 마지막 assistant 의 tool_calls 에 결과가 없으면
 /// 합성 결과를 붙여 이력을 봉합한다. 미응답 툴콜이 남으면 다음 턴에서 모델이
 /// 이전 작업을 마저 하느라 새 질문을 무시하는 "한 턴 밀림"이 생긴다 (실로그에서 확인).
@@ -311,18 +373,29 @@ pub async fn run_turn(
         .and_then(|m| m.content.clone())
         .unwrap_or_default();
     let excluded = tools_to_exclude(&user_text);
-    let tools = registry.schemas_excluding(&excluded);
     // 같은 (도구, 인자) 반복 차단 — 작은 모델의 루프 + 컨텍스트 낭비 방지
     let mut executed: std::collections::HashSet<(String, String)> = Default::default();
+    // 중복 호출이 거절된 도구 — 다음 라운드부터 스키마에서 숨긴다. 2B 는 보이는 도구를
+    // 계속 베끼므로(거절 피드백 무효) 베낄 대상을 치워야 다음 단계로 진행한다.
+    // (2026-06-12 실로그: zip 해제 후 zip_extract 만 반복하다 rename 못 가고 강제중단)
+    let mut looping_tools: std::collections::HashSet<String> = Default::default();
     // 빈 완성(사고만 하다 종료)은 샘플링 재시도로 한 번 회복을 시도한다
     let mut empty_retry_left = 1u32;
-    // 연속으로 "실행이 하나도 없었던" 라운드 수 — MAX_REJECTED_ROUNDS 에서 강제 마무리
+    // 연속으로 "성공이 하나도 없었던" 라운드 수 — MAX_REJECTED_ROUNDS 에서 강제 마무리
     let mut rejected_rounds = 0u32;
+    // 성공이 이어지는 한 계속 진행하되, 폭주는 절대 상한에서 끊는다
+    let hard_cap = max_tool_rounds.saturating_mul(HARD_CAP_FACTOR).max(max_tool_rounds);
 
-    for round in 0..=max_tool_rounds {
+    for round in 0..=hard_cap {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+        // 라운드마다 재구성: 발화 기반 제외 + 이번 턴에서 루프가 감지된 도구
+        let tools = {
+            let mut hidden = excluded.clone();
+            hidden.extend(looping_tools.iter().map(String::as_str));
+            registry.schemas_excluding(&hidden)
+        };
 
         let mut sink = |kind: DeltaKind, text: &str| -> bool {
             let ev = match kind {
@@ -364,6 +437,13 @@ pub async fn run_turn(
             }
         }
 
+        // 모델이 도구 호출 문법을 본문 텍스트로 뱉으면(서버가 파싱 못 한 잘못된 형식)
+        // 사용자 답변으로 노출하지 않는다. 마크업 앞의 진짜 텍스트만 남기고,
+        // 남는 게 없으면 빈 완성으로 취급해 아래의 재시도 경로를 그대로 태운다.
+        if result.tool_calls.is_empty() {
+            strip_tool_markup(&mut result.content);
+        }
+
         // 사고만 하다 토큰을 소진하면 본문도 툴콜도 없다 — 재생성 1회 후에도 비면 알린다
         if result.content.is_empty() && result.tool_calls.is_empty() {
             if empty_retry_left > 0 {
@@ -384,16 +464,16 @@ pub async fn run_turn(
         if result.tool_calls.is_empty() {
             break;
         }
-        if round == max_tool_rounds {
-            // 라운드 소진: 도구 결과 없이 종료를 알린다
+        if round == hard_cap {
+            // 절대 상한 소진: 도구 결과 없이 종료를 알린다
             emit(AgentEvent::Error {
                 session_id: session_id.to_string(),
-                message: format!("도구 호출 한도({max_tool_rounds}회) 초과로 중단"),
+                message: format!("도구 호출 한도({hard_cap}회) 초과로 중단"),
             });
             break;
         }
 
-        let mut any_real_execution = false;
+        let mut any_success = false;
         for call in &result.tool_calls {
             if cancel.load(Ordering::Relaxed) {
                 break;
@@ -418,9 +498,9 @@ pub async fn run_turn(
                     call.function.name
                 ))
             } else if !executed.insert(key) {
+                looping_tools.insert(call.function.name.clone());
                 (false, "이미 같은 인자로 호출한 도구입니다. 위의 기존 결과를 사용하거나 다른 행동을 취하세요.".to_string())
             } else {
-                any_real_execution = true;
                 let args: Value = serde_json::from_str(&call.function.arguments)
                     .unwrap_or(Value::Object(Default::default()));
                 // 도구는 동기 구현 — 블로킹 실행을 런타임에 알린다
@@ -432,6 +512,7 @@ pub async fn run_turn(
                     Err(e) => (false, format!("오류: {e:#}")),
                 }
             };
+            any_success |= ok;
             emit(AgentEvent::ToolCallEnd {
                 session_id: session_id.to_string(),
                 call_id: call.id.clone(),
@@ -442,20 +523,33 @@ pub async fn run_turn(
             messages.push(ChatMessage::tool(call.id.clone(), clip(&text, 4000)));
         }
 
-        // 진행 없는 라운드 연속 감지 → 도구를 떼고 지금까지의 결과로 최종 답변을 강제.
+        // 성공 없는 라운드 연속 감지 → 도구를 떼고 지금까지의 결과로 최종 답변을 강제.
+        // 실패(도구 에러 포함)는 빨리 멈추고, 성공하는 동안은 계속 — 2026-06-12 정책.
+        // 단, 위치 힌트가 담긴 실패는 회복 정보이므로 카운트를 보류한다 — 모델이 그 경로로
+        // 재시도할 라운드를 보장 (실로그: 힌트 도착 직후 조기중단돼 다음 턴에야 회복).
         // (거절 피드백만으로는 2B 가 루프를 못 벗어난다 — MAX_REJECTED_ROUNDS 주석 참고)
-        if any_real_execution {
+        let any_hint = messages
+            .iter()
+            .rev()
+            .take(result.tool_calls.len())
+            .any(|m| {
+                m.role == "tool"
+                    && m.content.as_deref().is_some_and(|c| c.contains("이 경로로 다시 시도하세요"))
+            });
+        if any_success {
             rejected_rounds = 0;
-        } else {
+        } else if !any_hint {
             rejected_rounds += 1;
         }
         if rejected_rounds >= MAX_REJECTED_ROUNDS && !cancel.load(Ordering::Relaxed) {
             let no_tools = Value::Array(vec![]);
-            let final_result = client.complete(messages, &no_tools, temperature, &mut sink).await?;
+            let mut final_result = client.complete(messages, &no_tools, temperature, &mut sink).await?;
+            // 도구를 떼고 물어도 2B 는 마크업을 텍스트로 뱉을 수 있다 (2026-06-12 적대 테스트)
+            strip_tool_markup(&mut final_result.content);
             if final_result.content.is_empty() {
                 emit(AgentEvent::Error {
                     session_id: session_id.to_string(),
-                    message: "같은 도구 호출이 반복되어 작업을 중단했습니다. 요청을 바꿔 다시 시도해보세요.".into(),
+                    message: "도구 실행이 진전 없이 반복되어 작업을 중단했습니다. 요청을 바꿔 다시 시도해보세요.".into(),
                 });
             } else {
                 messages.push(ChatMessage::assistant(Some(final_result.content), None));
@@ -465,6 +559,18 @@ pub async fn run_turn(
     }
 
     close_dangling_tool_calls(messages);
+    // 최종 답변 없이 끝난 턴(한도/강제중단/취소)은 명시적 종결 문장을 남긴다.
+    // 미완 작업 흔적이 다음 턴을 오염시키는 것을 막는다 (2026-06-12 실로그:
+    // 중단된 턴의 이름변경을 다음 턴 "압축 풀기" 요청에서 모델이 멋대로 이어함).
+    let ended_without_answer = messages.last().is_some_and(|m| {
+        !(m.role == "assistant" && m.content.as_deref().is_some_and(|c| !c.is_empty()))
+    });
+    if ended_without_answer {
+        messages.push(ChatMessage::assistant(
+            Some("(이전 요청은 완료되지 않은 채 중단됨. 사용자의 다음 요청만 새로 수행한다.)".into()),
+            None,
+        ));
+    }
     emit(AgentEvent::TurnEnd {
         session_id: session_id.to_string(),
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -518,6 +624,8 @@ mod tests {
     struct MockClient {
         responses: Mutex<Vec<Result<CompletionResult>>>,
         tool_counts: Mutex<Vec<usize>>,
+        /// 호출별로 받은 도구 스키마의 이름들 (턴 중 동적 숨김 검증용)
+        tool_names: Mutex<Vec<Vec<String>>>,
     }
 
     impl MockClient {
@@ -525,6 +633,7 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into_iter().map(Ok).collect()),
                 tool_counts: Mutex::new(vec![]),
+                tool_names: Mutex::new(vec![]),
             }
         }
     }
@@ -542,6 +651,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(tools.as_array().map(|a| a.len()).unwrap_or(0));
+            self.tool_names.lock().unwrap().push(
+                tools
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            );
             let r = self.responses.lock().unwrap().remove(0)?;
             if !r.content.is_empty() {
                 sink(DeltaKind::Text, &r.content);
@@ -652,6 +771,165 @@ mod tests {
         assert!(evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
     }
 
+    /// 성공이 이어지는 동안은 라운드 예산(max_tool_rounds)을 넘어 계속 진행한다.
+    /// (2026-06-12 실로그: 8회 전부 성공하며 일하던 턴이 고정 한도에 잘림 —
+    ///  "실패하면 중단, 성공하면 계속" 정책으로 변경)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_rounds_extend_beyond_round_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        // 서로 다른 인자의 성공 호출 6개 — max_tool_rounds=3 을 넘어서도 이어져야 한다
+        let mut responses: Vec<CompletionResult> = (0..6)
+            .map(|i| {
+                let sub = dir.path().join(format!("d{i}"));
+                std::fs::create_dir_all(&sub).unwrap();
+                tool_call_result("list_dir", serde_json::json!({"path": sub.to_string_lossy()}))
+            })
+            .collect();
+        responses.push(CompletionResult { content: "6개 폴더 확인 끝.".into(), ..Default::default() });
+        let client = MockClient::ok(responses);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("폴더들 봐줘")];
+        let events = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 3, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        assert!(
+            !evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "성공 진행 중엔 한도 에러가 나면 안 됨"
+        );
+        assert_eq!(messages.last().unwrap().content.as_deref(), Some("6개 폴더 확인 끝."));
+    }
+
+    /// 도구가 연속 2라운드 전부 실패하면 한도까지 끌지 않고 그 시점에 마무리한다
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consecutive_failed_rounds_finish_early() {
+        let client = MockClient::ok(vec![
+            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는파일1.txt"})),
+            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는파일2.txt"})),
+            // 강제 마무리(무도구) 응답
+            CompletionResult { content: "파일을 찾지 못했습니다.".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("읽어줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        let counts = client.tool_counts.lock().unwrap().clone();
+        assert_eq!(counts.len(), 3, "실패 2라운드 후 즉시 마무리 (8회까지 안 끌어야 함)");
+        assert_eq!(counts[2], 0, "마무리 호출은 도구 없이");
+        assert_eq!(messages.last().unwrap().content.as_deref(), Some("파일을 찾지 못했습니다."));
+    }
+
+    /// 성공이 이어져도 절대 상한(3×)에서는 멈춘다 — 폭주 백스톱
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hard_cap_stops_runaway_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let responses: Vec<CompletionResult> = (0..10)
+            .map(|i| {
+                let sub = dir.path().join(format!("r{i}"));
+                std::fs::create_dir_all(&sub).unwrap();
+                tool_call_result("list_dir", serde_json::json!({"path": sub.to_string_lossy()}))
+            })
+            .collect();
+        let client = MockClient::ok(responses);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("계속해")];
+        let events = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        // max=2 → 절대 상한 6: 성공만 반복해도 6라운드에서 한도 에러로 끊겨야 한다
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 2, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        assert!(evs.iter().any(
+            |e| matches!(e, AgentEvent::Error { message, .. } if message.contains("한도"))
+        ));
+        assert!(client.tool_counts.lock().unwrap().len() <= 7, "상한 부근에서 멈춰야 함");
+    }
+
+    /// 최종 답변 없이 중단된 턴은 히스토리에 명시적 종결 문장을 남긴다.
+    /// (2026-06-12 실로그: 중단된 턴의 이름변경 작업을 다음 턴 "압축 풀기" 요청에서
+    ///  모델이 멋대로 이어함 — 미완 흔적이 다음 턴을 오염)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aborted_turn_leaves_explicit_closure_message() {
+        // 전부 실패하는 호출 2라운드 → 강제 마무리도 빈 응답 → 에러로 중단
+        let client = MockClient::ok(vec![
+            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는1.txt"})),
+            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는2.txt"})),
+            CompletionResult::default(), // 강제 마무리 응답이 빈 완성
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("읽어줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        let last = messages.last().unwrap();
+        assert_eq!(last.role, "assistant", "중단 턴도 assistant 종결로 끝나야 함");
+        assert!(
+            last.content.as_deref().unwrap_or("").contains("완료되지 않"),
+            "미완 명시 없음: {:?}",
+            last.content
+        );
+    }
+
+    /// 위치 힌트("같은 이름의 파일 발견")가 담긴 실패 라운드는 중단 카운터에 세지 않는다.
+    /// 힌트는 회복 정보 — 모델이 그 경로로 다시 시도할 기회를 줘야 한다.
+    /// (2026-06-12 실로그: r1 힌트 도착 → r2 다른 실패 → 조기중단으로 힌트를 못 써봄.
+    ///  다음 턴에서 모델이 히스토리의 힌트를 베껴 성공한 것이 회복 가능성의 증거)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hint_round_does_not_count_toward_early_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        // 워크스페이스는 하위 폴더, 실제 파일은 부모에 (오염 시나리오)
+        let ws = dir.path().join("pngs");
+        std::fs::create_dir(&ws).unwrap();
+        let real = dir.path().join("data.txt");
+        std::fs::write(&real, "내용").unwrap();
+
+        let wrong = ws.join("data.txt").to_string_lossy().to_string();
+        let missing_dir = ws.join("없는폴더").to_string_lossy().to_string();
+        let client = MockClient::ok(vec![
+            // r1: 파일 없음 + 위치 힌트 (read_file 의 not_found_hint 가 부모에서 발견)
+            tool_call_result("read_file", serde_json::json!({"path": wrong})),
+            // r2: 힌트와 무관한 실패 (없는 디렉토리) — 기존 정책이면 여기서 조기중단
+            tool_call_result("list_dir", serde_json::json!({"path": missing_dir})),
+            // r3: 힌트의 경로로 재시도 — 이 라운드까지 살아 있어야 한다
+            tool_call_result("read_file", serde_json::json!({"path": real.to_string_lossy()})),
+            CompletionResult { content: "내용 확인 완료.".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut cfg = AppConfig::default();
+        cfg.workspace_dir = ws.to_string_lossy().into_owned();
+        let ctx = ToolCtx::noop(cfg);
+        let mut messages = vec![ChatMessage::user("data.txt 읽어줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &ctx, &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(
+            messages.last().unwrap().content.as_deref(),
+            Some("내용 확인 완료."),
+            "힌트 라운드가 카운트되면 r3 전에 조기중단된다"
+        );
+    }
+
     /// 같은 (도구, 인자) 재호출은 실행하지 않고 모델에 안내 메시지를 돌려준다
     #[tokio::test(flavor = "multi_thread")]
     async fn duplicate_tool_call_is_short_circuited() {
@@ -716,6 +994,125 @@ mod tests {
         let evs = events.lock().unwrap();
         assert!(!evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })), "오류 없이 답으로 종료");
         assert_eq!(messages.last().unwrap().content.as_deref(), Some("목록 정리: x.txt 1개입니다."));
+    }
+
+    /// 모델이 도구 호출 문법을 본문 텍스트로 뱉으면(서버 파싱 실패) 답변에서 걷어낸다.
+    /// (2026-06-12 적대 테스트: 강제 마무리 후 "<tool_call> <function=search_files>..." 가
+    ///  사용자 답변으로 그대로 노출됨)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_markup_suffix_is_stripped_from_answer() {
+        let client = MockClient::ok(vec![CompletionResult {
+            content: "검색 결과가 없습니다. <tool_call> <function=search_files> <parameter=pattern>".into(),
+            ..Default::default()
+        }]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("유니콘.png 찾아줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        let answer = messages.last().unwrap().content.as_deref().unwrap();
+        assert_eq!(answer, "검색 결과가 없습니다.");
+    }
+
+    /// 본문 전체가 도구 마크업이면 빈 완성으로 취급해 재시도 경로를 태운다
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pure_tool_markup_answer_is_retried_as_empty() {
+        let client = MockClient::ok(vec![
+            CompletionResult {
+                content: "<tool_call> <function=list_dir> </function>".into(),
+                ..Default::default()
+            },
+            CompletionResult { content: "폴더가 비어 있습니다.".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("뭐 있어?")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(messages.last().unwrap().content.as_deref(), Some("폴더가 비어 있습니다."));
+        assert!(
+            !messages.iter().any(|m| m.content.as_deref().is_some_and(|c| c.contains("<tool_call"))),
+            "마크업이 이력에 남으면 안 됨"
+        );
+    }
+
+    /// 이름변경 의도에서 write_file 로 새는 대체 행동을 차단한다
+    /// (2026-06-12 실로그: "이미지들 이름을 생성시간으로 전부 변경해봐" → write_file 로
+    ///  변경 목록 txt 를 만들고 "변경 완료"라고 거짓 보고. 사용자 추궁에도 반복.)
+    #[test]
+    fn rename_intent_excludes_write_file() {
+        for t in [
+            "이미지들 이름을 생성시간으로 전부 변경해봐",
+            "이름을 cat1,2,3 으로 변경해봐",
+            "그 파일 이름을 회의메모.txt로 바꿔",
+        ] {
+            assert!(tools_to_exclude(t).contains(&"write_file"), "{t}");
+            // 변환-사본(image_transform)으로 이름변경을 때우는 대체 행동도 차단
+            // (2026-06-12 실로그: cat.png → cat_2026-06-12.png 사본 생성 후 "변경 완료" 주장)
+            assert!(tools_to_exclude(t).contains(&"image_transform"), "{t}");
+        }
+        // 받아쓰기("라고")가 섞인 복합 요청은 쓰기가 본업 — write_file 을 숨기면 안 된다
+        assert!(
+            !tools_to_exclude("note.txt에 '안녕'이라고 적고, 파일 이름을 인사.txt로 바꿔줘")
+                .contains(&"write_file"),
+        );
+        // 사용자 호칭 이야기는 이름변경 의도가 아니다
+        assert!(!tools_to_exclude("내 이름은 태경이야. 기억해줘").contains(&"write_file"));
+    }
+
+    /// 완료 주장은 도구의 성공 결과에 근거해야 한다는 규칙이 프롬프트에 있어야 한다
+    /// (2026-06-12 실로그: list_dir 가 그대로인 파일명을 보여줘도 "변경 완료" 주장)
+    #[test]
+    fn prompt_has_claim_grounding_rule() {
+        let p = system_prompt(&AppConfig::default());
+        assert!(p.contains("성공 결과를 받았을 때만"), "완료 주장 근거 규칙 누락");
+    }
+
+    /// 파일 상태 추론(stale parroting 방지) + 검색 범위 규칙이 프롬프트에 있어야 한다
+    /// (2026-06-12 적대 테스트: '방금 바꾼 파일'에 옛 경로 복제, 못 찾자 Desktop 무단 검색)
+    #[test]
+    fn prompt_has_file_state_and_search_scope_rules() {
+        let p = system_prompt(&AppConfig::default());
+        assert!(p.contains("옛 경로"), "이동/이름변경 후 옛 경로 무효 규칙 누락");
+        assert!(p.contains("그대로 복사하지"), "이전 도구 호출 복제 금지 규칙 누락");
+        assert!(p.contains("위치를 묻는다"), "검색 범위 이탈 방지 규칙 누락");
+    }
+
+    /// 같은 호출이 거절된 도구는 그 턴의 다음 라운드부터 스키마에서 숨긴다.
+    /// 2B 는 보이는 도구를 계속 베끼므로 베낄 대상을 치워야 다음 단계로 간다.
+    /// (2026-06-12 실로그: zip 해제+이름변경 복합 요청 — zip_extract 성공 후 같은 호출만
+    ///  반복하다 강제중단, rename_file 까지 가지 못함)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicated_tool_is_hidden_from_next_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = serde_json::json!({"path": dir.path().to_string_lossy()});
+        let client = MockClient::ok(vec![
+            tool_call_result("list_dir", args.clone()),
+            tool_call_result("list_dir", args.clone()), // 중복 → 거절 + 이후 라운드에서 숨김
+            CompletionResult { content: "폴더 정리 끝.".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("정리해줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        let names = client.tool_names.lock().unwrap().clone();
+        assert!(names[0].iter().any(|n| n == "list_dir"), "첫 라운드엔 제공");
+        assert!(names[1].iter().any(|n| n == "list_dir"), "중복 발생 전까지 제공");
+        assert!(
+            !names[2].iter().any(|n| n == "list_dir"),
+            "중복 거절 후엔 스키마에서 숨겨야 함"
+        );
+        assert!(names[2].iter().any(|n| n == "rename_file"), "다른 도구는 그대로");
     }
 
     /// 강제 마무리 호출조차 빈 완성이면 사용자에게 오류로 알린다
@@ -799,6 +1196,7 @@ mod tests {
                 Ok(CompletionResult { content: "회복됨".into(), ..Default::default() }),
             ]),
             tool_counts: Mutex::new(vec![]),
+            tool_names: Mutex::new(vec![]),
         };
         let registry = ToolRegistry::with_default_tools();
         // 압축 대상이 되도록 긴 도구 결과 3개를 히스토리에 심는다
@@ -871,8 +1269,11 @@ mod tests {
 
     #[test]
     fn prompt_includes_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("작업방");
+        std::fs::create_dir(&ws).unwrap();
         let mut cfg = AppConfig::default();
-        cfg.workspace_dir = r"C:\Users\EST\작업방".into();
+        cfg.workspace_dir = ws.to_string_lossy().into_owned();
         let p = system_prompt(&cfg);
         assert!(p.contains("작업방"), "워크스페이스 경로가 프롬프트에 없음");
         assert!(p.contains("워크스페이스 안에서만"));
@@ -881,11 +1282,15 @@ mod tests {
     /// 경로 없는 이름은 워크스페이스 기준이라는 해석 규칙이 프롬프트 상단에 있어야 한다
     #[test]
     fn prompt_defaults_bare_names_to_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("작업방");
+        std::fs::create_dir(&ws).unwrap();
         let mut cfg = AppConfig::default();
-        cfg.workspace_dir = r"C:\Users\EST\작업방".into();
+        cfg.workspace_dir = ws.to_string_lossy().into_owned();
         let p = system_prompt(&cfg);
+        let ws_slash = ws.to_string_lossy().replace('\\', "/");
         assert!(
-            p.contains("현재 폴더(워크스페이스): C:/Users/EST/작업방"),
+            p.contains(&format!("현재 폴더(워크스페이스): {ws_slash}")),
             "워크스페이스가 슬래시 표기로 상단에 없음"
         );
         assert!(p.contains("경로 없이"), "경로 없는 이름의 기본 해석 규칙 누락");
@@ -899,8 +1304,10 @@ mod tests {
     #[test]
     fn prompt_asks_names_when_unknown() {
         let p = system_prompt(&AppConfig::default());
-        assert!(p.contains("update_profile"), "이름 저장 도구 안내 없음");
+        // update_profile 도구는 제거됨 (파일 이름변경과 오라우팅, 2026-06-12) — 프롬프트에 흔적이 없어야 한다
+        assert!(!p.contains("update_profile"), "제거된 도구가 프롬프트에 남음");
         assert!(p.contains("지어달라고"), "이름 지어달라는 지시 없음");
+        assert!(p.contains("설정"), "이름 저장 경로(설정 패널) 안내 없음");
     }
 
     #[test]
@@ -915,33 +1322,70 @@ mod tests {
 
     #[test]
     fn bg_keywords_exclude_image_transform() {
-        assert_eq!(tools_to_exclude("dog.png를 배경제거 해봐"), vec!["image_transform"]);
-        assert_eq!(tools_to_exclude("이 사진 누끼 따줘"), vec!["image_transform"]);
-        assert_eq!(tools_to_exclude("배경을 빼서 투명하게"), vec!["image_transform"]);
-        assert!(tools_to_exclude("dog.png를 90도 회전시켜줘").is_empty());
-        assert!(tools_to_exclude("배경화면 바꿔줘").is_empty(), "배경화면은 배경제거가 아님");
+        for t in ["dog.png를 배경제거 해봐", "이 사진 누끼 따줘", "배경을 빼서 투명하게"] {
+            assert!(tools_to_exclude(t).contains(&"image_transform"), "{t}");
+        }
+        assert!(!tools_to_exclude("dog.png를 90도 회전시켜줘").contains(&"image_transform"));
+        assert!(
+            !tools_to_exclude("배경화면 바꿔줘").contains(&"image_transform"),
+            "배경화면은 배경제거가 아님"
+        );
     }
 
     /// 받아쓰기 쓰기 의도는 읽기/탐색 도구를 숨기고, 복합·읽기 질의는 건드리지 않는다
     #[test]
     fn dictation_write_excludes_read_tools() {
-        let excluded = vec!["read_file", "list_dir", "search_files", "pdf_extract_text", "move_path", "copy_path", "delete_path"];
+        let read_tools = ["read_file", "list_dir", "search_files", "pdf_extract_text", "move_path", "rename_file", "copy_path", "delete_path"];
         // GT 실패 5건 전부 라우팅돼야 한다
-        assert_eq!(tools_to_exclude("todo.md에 '장보기' 라고 적어줘"), excluded);
-        assert_eq!(
-            tools_to_exclude("minutes.txt에 \"회의 요약: 배포 일정 확정\"이라고 저장해줘"),
-            excluded,
-            "따옴표 안 '요약'은 읽기 단서로 치지 않는다"
-        );
-        assert_eq!(tools_to_exclude("contacts.csv에 \"이름,전화번호\"라고 기록해줘"), excluded);
-        assert_eq!(tools_to_exclude("plan.md에 \"보고서 작성, 메일 회신\"이라고 작성해줘"), excluded);
-        assert_eq!(tools_to_exclude("idea.txt에 \"신제품 마케팅 아이디어\"라고 적어줘"), excluded);
+        for t in [
+            "todo.md에 '장보기' 라고 적어줘",
+            "minutes.txt에 \"회의 요약: 배포 일정 확정\"이라고 저장해줘", // 따옴표 안 '요약'은 읽기 단서 아님
+            "contacts.csv에 \"이름,전화번호\"라고 기록해줘",
+            "plan.md에 \"보고서 작성, 메일 회신\"이라고 작성해줘",
+            "idea.txt에 \"신제품 마케팅 아이디어\"라고 적어줘",
+        ] {
+            let ex = tools_to_exclude(t);
+            for r in read_tools {
+                assert!(ex.contains(&r), "{t} 에서 {r} 제외 누락");
+            }
+            assert!(!ex.contains(&"write_file"), "{t}");
+        }
 
         // 멀티스텝(읽기→요약→쓰기)과 읽기 질의는 라우팅하면 안 된다
-        assert!(tools_to_exclude("report.md를 읽고 요약해서 summary.md에 저장해줘").is_empty());
-        assert!(tools_to_exclude("guide.md에 뭐라고 적혀 있어?").is_empty());
-        assert!(tools_to_exclude("로그 내용을 정리해서 result.txt라고 저장해줘").is_empty());
-        assert!(tools_to_exclude("todo.md 적힌 거 보여줘").is_empty());
+        for t in [
+            "report.md를 읽고 요약해서 summary.md에 저장해줘",
+            "guide.md에 뭐라고 적혀 있어?",
+            "로그 내용을 정리해서 result.txt라고 저장해줘",
+            "todo.md 적힌 거 보여줘",
+        ] {
+            assert!(
+                !tools_to_exclude(t).iter().any(|n| read_tools.contains(n)),
+                "{t}"
+            );
+        }
+    }
+
+    /// 압축 풀기 의도에선 zip_create 를 숨긴다
+    /// (2026-06-12 실로그: 풀 zip 이 없자 zip_create 로 새 zip 을 만드는 대체 행동)
+    #[test]
+    fn extract_intent_excludes_zip_create() {
+        let compound = tools_to_exclude("pngs.zip 압축풀고 거기에 있는 이미지 파일들 오늘날짜로 이름 변경해줘");
+        assert!(compound.contains(&"zip_create"), "풀기 의도에서 zip_create 숨김");
+        assert!(compound.contains(&"write_file"), "이름변경 의도와 합성돼야 함");
+        assert!(tools_to_exclude("백업.zip 압축 해제해줘").contains(&"zip_create"));
+        // 압축 생성 의도는 제외하지 않는다
+        assert!(!tools_to_exclude("이미지들 압축해줘").contains(&"zip_create"));
+    }
+
+    /// set_workspace 는 사용자가 워크스페이스를 직접 언급한 턴에만 노출한다.
+    /// 부작용이 턴을 넘어 지속되는 유일한 도구 — 오발사 비용이 가장 크다.
+    /// (2026-06-12 실로그: 모델이 임의 호출 → 다음 턴의 경로 해석 전부 붕괴)
+    #[test]
+    fn set_workspace_hidden_unless_mentioned() {
+        assert!(tools_to_exclude("이미지 파일들 보여줘").contains(&"set_workspace"));
+        assert!(tools_to_exclude("이름을 cat1로 바꿔").contains(&"set_workspace"));
+        assert!(!tools_to_exclude("워크스페이스를 pngs 폴더로 바꿔줘").contains(&"set_workspace"));
+        assert!(!tools_to_exclude("작업 폴더를 바탕화면으로 변경해").contains(&"set_workspace"));
     }
 
     #[test]
@@ -971,7 +1415,8 @@ mod tests {
     fn capability_rule_is_positive_only() {
         let p = system_prompt(&AppConfig::default());
         let start = p.find("11.").expect("능력 규칙 존재");
-        let end = p.find("페르소나").unwrap_or(p.len());
+        // 능력 규칙(11)만 검사 — 12 이후는 별개 규칙(파일 상태/검색 범위)이라 부정어가 정당하다
+        let end = p.find("12.").or_else(|| p.find("페르소나")).unwrap_or(p.len());
         let rule = &p[start..end];
         assert!(rule.contains("배경제거"), "가능 작업 나열에 배경제거 포함");
         for bad in ["못 ", "못하", "할 수 없", "불가능", "금지"] {
@@ -1080,8 +1525,11 @@ mod tests {
         enforce_history_budget(&mut msgs, 2200);
         assert!(msgs[0].content.as_deref().unwrap().contains("질문0"));
 
+        let tmp_ws = tempfile::tempdir().unwrap();
+        let ws = tmp_ws.path().join("작업방");
+        std::fs::create_dir(&ws).unwrap();
         let mut cfg = AppConfig::default();
-        cfg.workspace_dir = r"C:\Users\EST\작업방".into();
+        cfg.workspace_dir = ws.to_string_lossy().into_owned();
         refresh_system_prompt(&mut msgs, &cfg);
 
         let prompt = msgs[0].content.as_deref().unwrap();
@@ -1096,11 +1544,18 @@ mod tests {
     // ── 맥락 유지: 미응답 툴콜 봉합 ─────────────────────────────────────────
 
     /// 라운드 한도로 중단된 턴: 마지막 assistant 의 tool_calls 에 합성 결과가 붙어
-    /// 이력이 [assistant(tool_calls) → tool] 쌍으로 닫혀야 한다 ("한 턴 밀림" 회귀 방지)
+    /// 이력이 [assistant(tool_calls) → tool] 쌍으로 닫혀야 한다 ("한 턴 밀림" 회귀 방지).
+    /// 새 정책에서 한도(hard cap)는 성공이 이어질 때만 도달하므로 성공 호출로 채운다.
     #[tokio::test(flavor = "multi_thread")]
     async fn round_limit_closes_dangling_tool_calls() {
-        let responses: Vec<CompletionResult> = (0..5)
-            .map(|i| tool_call_result("list_dir", serde_json::json!({"path": format!("C:\\{i}")})))
+        let dir = tempfile::tempdir().unwrap();
+        // max=2 → hard cap 6: 성공 호출 7개로 상한을 넘긴다
+        let responses: Vec<CompletionResult> = (0..7)
+            .map(|i| {
+                let sub = dir.path().join(format!("c{i}"));
+                std::fs::create_dir_all(&sub).unwrap();
+                tool_call_result("list_dir", serde_json::json!({"path": sub.to_string_lossy()}))
+            })
             .collect();
         let client = MockClient::ok(responses);
         let registry = ToolRegistry::with_default_tools();
@@ -1121,8 +1576,12 @@ mod tests {
                 assert!(answered.contains(c.id.as_str()), "미응답 툴콜이 남음: {}", c.id);
             }
         }
-        assert_eq!(messages.last().unwrap().role, "tool");
-        assert!(messages.last().unwrap().content.as_deref().unwrap().contains("중단"));
+        // 미응답 툴콜 봉합(tool) 뒤에 명시적 종결 노트(assistant)가 온다
+        let tool_msgs: Vec<_> = messages.iter().filter(|m| m.role == "tool").collect();
+        assert!(tool_msgs.last().unwrap().content.as_deref().unwrap().contains("중단"));
+        let last = messages.last().unwrap();
+        assert_eq!(last.role, "assistant", "턴은 항상 assistant 종결로 끝난다");
+        assert!(last.content.as_deref().unwrap().contains("완료되지 않"));
     }
 
     // ── 맥락 유지: 제외 도구 실행 차단 ──────────────────────────────────────

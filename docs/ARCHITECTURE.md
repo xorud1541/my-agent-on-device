@@ -43,7 +43,7 @@
 ## 에이전트 루프 (agent.rs::run_turn)
 
 ```
-사용자 발화 → [라운드 ≤ max_tool_rounds(8)]
+사용자 발화 → [성공하는 동안 계속, 절대 상한 = max_tool_rounds×3(24)]
   complete() 스트리밍 (thinking/text 델타 즉시 emit)
   ├─ 툴콜 없음 → 종료
   ├─ 빈 완성 (본문·툴콜 모두 없음) → 1회 재생성, 그래도 비면 Error emit
@@ -79,4 +79,4 @@
 | max_output_tokens | 1024 | 레이턴시 상한 레버 |
 | reasoning_budget | 0 (사고 끔) | N>0: 예산+유도 메시지, -1: 무제한 |
 | temperature | 0.4 | 높이면 툴콜 JSON 오류율 증가 |
-| max_tool_rounds | 8 | 턴당 루프 상한 |
+| max_tool_rounds | 8 | 루프 예산 기준값 — 성공 라운드는 예산을 깎지 않고, 성공 0회 라운드 2연속이면 조기 마무리, 절대 상한은 ×3 (2026-06-12 정책) |

@@ -100,13 +100,17 @@ fn config_file() -> PathBuf {
 }
 
 impl AppConfig {
-    /// 워크스페이스 절대경로. 설정이 비어있으면 홈 디렉토리.
+    /// 워크스페이스 절대경로. 설정이 비어있거나 폴더가 사라졌으면 홈 디렉토리로 폴백.
+    /// (2026-06-12 실로그: 워크스페이스가 삭제된 폴더를 가리키면 모든 베어네임 해석이
+    ///  허공을 가리켜 턴이 연쇄 실패 — 존재하는 경로만 워크스페이스가 될 수 있다)
     pub fn workspace_path(&self) -> PathBuf {
-        if self.workspace_dir.trim().is_empty() {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
-        } else {
-            PathBuf::from(&self.workspace_dir)
+        if !self.workspace_dir.trim().is_empty() {
+            let p = PathBuf::from(&self.workspace_dir);
+            if p.is_dir() {
+                return p;
+            }
         }
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 
     pub fn load() -> Self {
@@ -124,5 +128,33 @@ impl AppConfig {
         }
         std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 설정된 워크스페이스 폴더가 삭제됐으면 존재하는 기본 경로로 폴백한다.
+    /// (2026-06-12 실로그: 모델이 set_workspace 로 하위 폴더 지정 → 사용자가 폴더 삭제 →
+    ///  이후 모든 베어네임 해석이 허공을 가리켜 세 턴 연속 실패)
+    #[test]
+    fn workspace_path_falls_back_when_dir_missing() {
+        let cfg = AppConfig {
+            workspace_dir: "C:/이런폴더는없습니다/진짜로없음".into(),
+            ..AppConfig::default()
+        };
+        let p = cfg.workspace_path();
+        assert!(p.exists(), "사라진 워크스페이스는 존재하는 경로로 폴백해야 함: {p:?}");
+    }
+
+    #[test]
+    fn workspace_path_keeps_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            workspace_dir: tmp.path().to_string_lossy().into_owned(),
+            ..AppConfig::default()
+        };
+        assert_eq!(cfg.workspace_path(), tmp.path());
     }
 }

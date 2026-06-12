@@ -140,7 +140,14 @@ impl Tool for ZipExtract {
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
-        let file = File::open(path).with_context(|| format!("파일 없음: {path}"))?;
+        // 존재 확인을 먼저 — 힌트가 os 에러 꼬리 없이 문장 끝에 오도록 (2B 주의 분산 방지)
+        if !Path::new(path).exists() {
+            bail!(
+                "파일 없음: {path}.{}",
+                crate::tools::not_found_hint(path, &ctx.workspace())
+            );
+        }
+        let file = File::open(path).with_context(|| format!("파일 열기 실패: {path}"))?;
         let mut archive = zip::ZipArchive::new(file).context("zip 형식 아님")?;
 
         if args
@@ -231,6 +238,30 @@ mod tests {
     use super::*;
     use crate::tools::test_support::ctx_with_workspace;
     use tempfile::tempdir;
+
+    /// zip 이 없으면 워크스페이스 일대에서 같은 이름을 찾아 힌트를 준다
+    /// (2026-06-12 실로그: pngs/pngs.zip 없음 → 모델이 환각 zip 경로로 배회)
+    #[test]
+    fn zip_extract_not_found_error_includes_location_hint() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("pngs");
+        std::fs::create_dir(&ws).unwrap();
+        // 실제 zip 은 워크스페이스의 부모에 있다
+        std::fs::write(dir.path().join("pngs.zip"), "dummy").unwrap();
+
+        let ctx = ctx_with_workspace(&ws);
+        let wrong = ws.join("pngs.zip").to_string_lossy().to_string();
+        let err = ZipExtract
+            .execute(&serde_json::json!({"path": wrong}), &ctx)
+            .unwrap_err()
+            .to_string();
+        let real = dir
+            .path()
+            .join("pngs.zip")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(err.contains(&real), "실제 위치 힌트 없음: {err}");
+    }
 
     #[test]
     fn zip_roundtrip_with_korean_names() {

@@ -23,9 +23,17 @@ impl Tool for ImageInfo {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
-        let meta = std::fs::metadata(path).with_context(|| format!("파일 없음: {path}"))?;
+        // 존재 확인을 먼저 — 위치 힌트가 os 에러 꼬리 없이 문장 끝에 오도록
+        if !Path::new(path).exists() {
+            bail!(
+                "파일 없음: {path}.{}",
+                crate::tools::not_found_hint(path, &ctx.workspace())
+            );
+        }
+        let meta =
+            std::fs::metadata(path).with_context(|| format!("파일 정보 조회 실패: {path}"))?;
         let img = image::image_dimensions(path).with_context(|| format!("이미지 아님: {path}"))?;
         let format = ImageFormat::from_path(path)
             .map(|f| format!("{f:?}"))

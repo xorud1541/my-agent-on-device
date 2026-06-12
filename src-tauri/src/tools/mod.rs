@@ -5,7 +5,6 @@ mod image_ai;
 mod image_tools;
 mod pdf_make;
 mod pdf_tools;
-mod profile;
 mod search;
 pub mod workspace;
 
@@ -86,6 +85,7 @@ impl ToolRegistry {
                 Box::new(fs_tools::ReadFile),
                 Box::new(fs_tools::WriteFile),
                 Box::new(fs_tools::MovePath),
+                Box::new(fs_tools::RenameFile),
                 Box::new(fs_tools::CopyPath),
                 Box::new(fs_tools::DeletePath),
                 Box::new(search::SearchFiles),
@@ -98,7 +98,6 @@ impl ToolRegistry {
                 Box::new(archive::ZipCreate),
                 Box::new(archive::ZipExtract),
                 Box::new(workspace::SetWorkspace),
-                Box::new(profile::UpdateProfile),
             ],
         }
     }
@@ -154,6 +153,133 @@ pub(crate) fn opt_u64(args: &Value, key: &str) -> Option<u64> {
 
 pub(crate) fn opt_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(Value::as_bool)
+}
+
+/// 요청 경로에 파일이 없을 때 워크스페이스 일대(부모 1단계 + 하위 깊이 2)에서 같은/비슷한
+/// 이름을 찾아 힌트 문장을 만든다. 2B 에게 "파일 없음"은 막다른 골목이라, 에러가
+/// 올바른 경로를 직접 알려줘야 다음 라운드에서 복구한다
+/// (2026-06-12 실로그: 오염된 워크스페이스에서 pngs.zip 못 찾음 → 환각 zip 경로로 배회).
+/// 유사 일치는 확장자가 같고 어간이 한쪽을 포함할 때만 — 2B 의 토큰 융합 오타
+/// ("pngs.zip" → "pngs.pngs.zip")를 잡는다. 정확 일치가 항상 우선.
+pub(crate) fn not_found_hint(requested: &str, ws: &std::path::Path) -> String {
+    let req_path = std::path::Path::new(requested);
+    let Some(name) = req_path.file_name() else {
+        return String::new();
+    };
+    let req_stem = req_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let req_ext = req_path
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // 부모를 먼저 본다 — "워크스페이스가 하위로 좁혀진" 오염 케이스가 실제 사고였다
+    let mut queue: Vec<(std::path::PathBuf, u8)> = Vec::new();
+    if let Some(parent) = ws.parent() {
+        queue.push((parent.to_path_buf(), 1));
+    }
+    queue.push((ws.to_path_buf(), 0));
+
+    let mut fuzzy: Option<std::path::PathBuf> = None;
+    let mut scanned = 0usize;
+    while let Some((dir, depth)) = queue.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            scanned += 1;
+            if scanned > 500 {
+                break; // 거대 폴더에서 비용 폭주 방지 — 그때까지의 유사 후보는 유효
+            }
+            let p = e.path();
+            if p == req_path || !p.is_file() {
+                if p.is_dir() && depth < 2 {
+                    queue.push((p, depth + 1));
+                }
+                continue;
+            }
+            if p.file_name() == Some(name) {
+                return format!(
+                    " 같은 이름의 파일 발견: {} — 이 경로로 다시 시도하세요.",
+                    p.to_string_lossy().replace('\\', "/")
+                );
+            }
+            if fuzzy.is_none() {
+                let stem = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                let ext = p
+                    .extension()
+                    .map(|s| s.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                if !req_ext.is_empty()
+                    && ext == req_ext
+                    && stem.chars().count() >= 3
+                    && (req_stem.contains(&stem) || stem.contains(&req_stem))
+                {
+                    fuzzy = Some(p);
+                }
+            }
+        }
+    }
+    match fuzzy {
+        Some(p) => format!(
+            " 비슷한 파일 발견: {} — 이 경로로 다시 시도하세요.",
+            p.to_string_lossy().replace('\\', "/")
+        ),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 오타 경로도 유사 일치로 힌트를 준다 (2026-06-12 실로그: 모델이 "pngs.zip"을
+    /// "pngs.pngs.zip"으로 융합 — 정확 일치만으로는 2B 오타를 못 잡는다)
+    #[test]
+    fn not_found_hint_matches_fuzzy_typo() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pngs.zip"), "z").unwrap();
+        let typo = dir
+            .path()
+            .join("pngs.pngs.zip")
+            .to_string_lossy()
+            .to_string();
+        let hint = not_found_hint(&typo, dir.path());
+        assert!(hint.contains("pngs.zip"), "{hint}");
+        assert!(hint.contains("다시 시도"), "{hint}");
+    }
+
+    #[test]
+    fn not_found_hint_fuzzy_requires_same_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pngs.txt"), "t").unwrap();
+        // 확장자가 다르면 유사 일치하지 않는다 (오인 유도 방지)
+        let hint = not_found_hint(
+            &dir.path().join("pngs.pngs.zip").to_string_lossy(),
+            dir.path(),
+        );
+        assert!(hint.is_empty(), "{hint}");
+    }
+
+    /// 2B 라우팅 정확도를 위해 도구 표면을 좁게 유지한다:
+    /// 이름변경은 rename_file 전담, update_profile 은 제거됨 (2026-06-12 오라우팅 사고).
+    #[test]
+    fn registry_has_rename_file_and_no_update_profile() {
+        let names: Vec<String> = ToolRegistry::with_default_tools()
+            .schemas()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"rename_file".to_string()), "{names:?}");
+        assert!(!names.contains(&"update_profile".to_string()), "{names:?}");
+    }
 }
 
 #[cfg(test)]

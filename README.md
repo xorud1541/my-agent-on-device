@@ -33,12 +33,12 @@ pnpm tauri build
 React (채팅 UI) ── invoke/listen ── Rust (Tauri)
                                       ├─ agent.rs    에이전트 루프 (툴콜 반복, 취소, 회복)
                                       ├─ llm/        llama-server 사이드카 + SSE 스트리밍 클라이언트
-                                      ├─ tools/      list_dir, read/write_file, move/copy/delete,
+                                      ├─ tools/      list_dir, read/write_file, move/rename/copy/delete,
                                       │              search_files, image_info/transform,
                                       │              remove_background(ONNX), images_to_pdf,
                                       │              pdf_extract_text, screen_capture,
                                       │              zip_create/zip_extract,
-                                      │              set_workspace, update_profile
+                                      │              set_workspace
                                       └─ commands.rs IPC 커맨드 + 세션 관리
                                             │ HTTP (OpenAI 호환, localhost)
                                             ▼
@@ -58,7 +58,8 @@ React (채팅 UI) ── invoke/listen ── Rust (Tauri)
 - **이미지 → PDF**: `images_to_pdf` 도구 (JPEG 무손실 passthrough, EXIF/알파 보정, A4/Letter/Fit).
   경로 배열(`paths`) 또는 폴더(`dir`, 이름순) 입력 — 작은 모델이 경로를 직접 옮겨 적지 않아도 된다.
 - **페르소나**: 이름(user_name/agent_name)이 비어 있으면 대화 초반에 서로 이름을 묻고
-  `update_profile` 로 영속화. 설정 패널에서도 수정 가능.
+  설정 패널에서 저장하도록 안내한다. (`update_profile` 도구는 파일 이름변경 요청과
+  오라우팅되어 제거 — 2B 라우팅 정확도를 위해 도구 표면을 좁게 유지한다.)
 
 ## 문서
 
