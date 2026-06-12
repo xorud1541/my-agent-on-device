@@ -1,8 +1,47 @@
 use crate::models::{ChatMessage, CompletionResult, FunctionCall, ToolCall};
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+/// ChatMessage 를 llama-server /v1/chat/completions 요청용 JSON 으로 변환한다.
+/// images 가 있고 vision 이 켜져 있으면 content 를 멀티모달 배열로 바꾸고
+/// 파일을 base64 image_url 로 인라인한다. 그 외에는 기존 직렬화 그대로.
+pub(crate) fn message_to_request_value(m: &ChatMessage, vision_enabled: bool) -> Value {
+    let mut v = serde_json::to_value(m).unwrap_or(Value::Null);
+    if let Value::Object(map) = &mut v {
+        map.remove("images"); // 내부 전용 필드 — 서버로 보내지 않는다
+    }
+    let Some(paths) = m.images.as_ref().filter(|p| !p.is_empty()) else {
+        return v;
+    };
+    if !vision_enabled {
+        return v; // 모델에 vision 없음 — 경로 마커가 든 텍스트만 전송(도구는 동작)
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    if let Some(text) = &m.content {
+        parts.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    for p in paths {
+        let Ok(bytes) = std::fs::read(p) else { continue }; // 캐시 비움 등 → 생략
+        let lower = p.to_lowercase();
+        let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+            "image/jpeg"
+        } else {
+            "image/png"
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{mime};base64,{b64}") }
+        }));
+    }
+    if let Value::Object(map) = &mut v {
+        map.insert("content".into(), Value::Array(parts));
+    }
+    v
+}
 
 /// 스트리밍 중간 콜백. (thinking 토큰인지 여부, 텍스트 조각)
 /// false 를 돌려주면 생성을 즉시 중단한다 (사용자 취소).
@@ -31,6 +70,8 @@ pub struct HttpLlmClient {
     pub base_url: String,
     /// 호출당 출력 토큰 상한 — 레이턴시 예산의 핵심 레버 (20 t/s 기준 1024 ≈ 50초)
     pub max_tokens: u32,
+    /// 로드된 모델에 mmproj(vision)가 붙어 있는지. 꺼지면 이미지 파트를 전송하지 않는다.
+    pub vision_enabled: bool,
     http: reqwest::Client,
 }
 
@@ -40,8 +81,8 @@ pub struct HttpLlmClient {
 const REPEAT_PENALTY: f32 = 1.1;
 
 impl HttpLlmClient {
-    pub fn new(base_url: String, max_tokens: u32) -> Self {
-        Self { base_url, max_tokens, http: reqwest::Client::new() }
+    pub fn new(base_url: String, max_tokens: u32, vision_enabled: bool) -> Self {
+        Self { base_url, max_tokens, vision_enabled, http: reqwest::Client::new() }
     }
 
     /// 서버가 /health 로 살아날 때까지 최대 `secs` 초 대기 (크래시 후 사이드카 재기동 대비)
@@ -77,7 +118,9 @@ impl LlmClient for HttpLlmClient {
     ) -> Result<CompletionResult> {
         let body = serde_json::json!({
             "model": "default",
-            "messages": messages,
+            "messages": messages.iter()
+                .map(|m| message_to_request_value(m, self.vision_enabled))
+                .collect::<Vec<_>>(),
             "tools": tools,
             "tool_choice": "auto",
             "temperature": temperature,
@@ -234,7 +277,7 @@ mod tests {
             }
         });
 
-        let client = HttpLlmClient::new(base_url, 1024);
+        let client = HttpLlmClient::new(base_url, 1024, false);
         let messages = vec![ChatMessage::user("hi")];
         let mut sink = |_k: DeltaKind, _t: &str| true;
         let result = client
@@ -267,7 +310,7 @@ mod tests {
             let _ = sock.write_all(resp.as_bytes()).await;
         });
 
-        let client = HttpLlmClient::new(base_url, 1024);
+        let client = HttpLlmClient::new(base_url, 1024, false);
         let messages = vec![ChatMessage::user("hi")];
         let mut sink = |_k: DeltaKind, _t: &str| true;
         let _ = client.complete(&messages, &serde_json::json!([]), 0.2, &mut sink).await;
@@ -300,7 +343,7 @@ mod tests {
             }
         });
 
-        let client = HttpLlmClient::new(base_url, 1024);
+        let client = HttpLlmClient::new(base_url, 1024, false);
         let messages = vec![ChatMessage::user("hi")];
         let mut sink = |_k: DeltaKind, _t: &str| true;
         let err = client
@@ -335,7 +378,7 @@ mod tests {
             }
         });
 
-        let client = HttpLlmClient::new(base_url, 1024);
+        let client = HttpLlmClient::new(base_url, 1024, false);
         let messages = vec![ChatMessage::user("hi")];
         let mut seen = 0u32;
         let mut sink = |_k: DeltaKind, _t: &str| {
@@ -351,5 +394,52 @@ mod tests {
         assert!(result.content.starts_with("토큰0"), "{}", result.content);
         assert!(seen >= 3 && seen < 50, "스트림이 일찍 끊겨야 함 (seen={seen})");
         assert!(started.elapsed().as_secs() < 5, "50청크 전체를 기다리면 안 됨");
+    }
+}
+
+#[cfg(test)]
+mod multimodal_tests {
+    use super::*;
+    use crate::models::ChatMessage;
+
+    #[test]
+    fn image_message_becomes_multimodal_when_vision_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("x.png");
+        std::fs::write(&p, b"\x89PNG-fake-bytes").unwrap();
+        let m = ChatMessage::user_with_images("설명해줘", vec![p.to_string_lossy().into_owned()]);
+        let v = message_to_request_value(&m, true);
+        let content = v.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(content[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert!(v.get("images").is_none(), "요청에는 내부 images 키가 없어야 함");
+    }
+
+    #[test]
+    fn image_message_stays_text_when_vision_disabled() {
+        let m = ChatMessage::user_with_images("설명해줘", vec!["/no/such.png".into()]);
+        let v = message_to_request_value(&m, false);
+        assert!(v.get("content").unwrap().is_string(), "vision 꺼짐: content 는 문자열 유지");
+        assert!(v.get("images").is_none());
+    }
+
+    #[test]
+    fn missing_image_file_is_dropped_not_errored() {
+        let m = ChatMessage::user_with_images("설명", vec!["/definitely/missing.png".into()]);
+        let v = message_to_request_value(&m, true);
+        let content = v.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn plain_text_message_unchanged() {
+        let m = ChatMessage::user("그냥 텍스트");
+        let v = message_to_request_value(&m, true);
+        assert!(v.get("content").unwrap().is_string());
     }
 }
