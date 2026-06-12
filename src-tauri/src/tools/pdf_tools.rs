@@ -31,6 +31,37 @@ impl Tool for PdfExtractText {
         if !Path::new(path).exists() {
             bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
         }
+        // 비-PDF 가드 — 2B 는 OCR 요청("화면 텍스트 긁어줘")에 png 를 이 도구로 반복
+        // 시도하며 배회하고 거짓 희망("흑백 변환 후 재시도")까지 안내한다 (2026-06-12
+        // 기획자 테스트 턴 50/59/62/63). '알리세요' 마커로 1라운드 정직 종결을 이끈다.
+        // 확장자가 .pdf 가 아니어도 헤더가 %PDF 면 진짜 PDF 로 보고 통과시킨다.
+        let ext = Path::new(path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if ext != "pdf" {
+            let is_pdf_header = std::fs::File::open(path)
+                .and_then(|mut f| {
+                    use std::io::Read;
+                    let mut head = [0u8; 5];
+                    f.read_exact(&mut head).map(|_| head.starts_with(b"%PDF"))
+                })
+                .unwrap_or(false);
+            if !is_pdf_header {
+                const IMAGE_EXTS: &[&str] =
+                    &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "tif"];
+                if IMAGE_EXTS.contains(&ext.as_str()) {
+                    bail!(
+                        "이 파일은 PDF가 아니라 이미지(.{ext})입니다. 이미지 속 글자를 읽는 \
+                         기능(OCR)은 없습니다 — 이 사실을 그대로 사용자에게 알리세요."
+                    );
+                }
+                bail!(
+                    "이 파일은 PDF가 아닙니다(.{ext}). PDF 텍스트 추출은 .pdf 파일에만 \
+                     사용할 수 있습니다 — 이 사실을 그대로 사용자에게 알리세요."
+                );
+            }
+        }
         let max_chars = opt_u64(args, "max_chars").unwrap_or(DEFAULT_MAX_CHARS) as usize;
         let text = pdf_extract::extract_text(path)
             .with_context(|| format!("PDF 텍스트 추출 실패: {path}"))?;
@@ -54,5 +85,60 @@ impl Tool for PdfExtractText {
         } else {
             Ok(truncated)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::test_support::ctx_with_workspace;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    /// 이미지에 pdf_extract_text 를 쓰면 OCR 부재를 알리는 '알리세요' 마커 에러를 준다
+    /// (2026-06-12 기획자 테스트: "화면 텍스트 긁어줘"에 png 추출을 반복하며 배회)
+    #[test]
+    fn image_input_gets_ocr_unavailable_marker() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let p = dir.path().join("capture.png");
+        std::fs::write(&p, b"\x89PNG\r\n\x1a\n....").unwrap();
+        let err = PdfExtractText
+            .execute(&json!({"path": p.to_string_lossy()}), &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("OCR"), "{err}");
+        assert!(err.contains("사용자에게 알리세요"), "{err}");
+    }
+
+    /// 일반 비-PDF(txt 등)도 마커 에러로 거른다 (턴 50: pngs.txt 를 PDF 로 추출 시도)
+    #[test]
+    fn non_pdf_input_gets_marker_error() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let p = dir.path().join("pngs.txt");
+        std::fs::write(&p, "텍스트").unwrap();
+        let err = PdfExtractText
+            .execute(&json!({"path": p.to_string_lossy()}), &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("PDF가 아닙니다"), "{err}");
+        assert!(err.contains("사용자에게 알리세요"), "{err}");
+    }
+
+    /// 확장자가 없어도 %PDF 헤더면 진짜 PDF 로 보고 가드를 통과시킨다 (오탐 방지)
+    #[test]
+    fn pdf_header_without_extension_passes_guard() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let p = dir.path().join("doc");
+        std::fs::write(&p, b"%PDF-1.5 broken").unwrap();
+        let err = PdfExtractText
+            .execute(&json!({"path": p.to_string_lossy()}), &ctx)
+            .unwrap_err()
+            .to_string();
+        // 가드가 아니라 파서 단계까지 도달해야 한다
+        assert!(!err.contains("PDF가 아닙니다"), "{err}");
+        assert!(err.contains("추출 실패"), "{err}");
     }
 }
