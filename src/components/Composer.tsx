@@ -1,22 +1,33 @@
+import { invoke } from "@tauri-apps/api/core";
 import { FormEvent, KeyboardEvent, useRef, useState } from "react";
+
+interface Attachment {
+  path: string;
+  thumb: string;
+}
 
 interface Props {
   busy: boolean;
   disabled: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: Attachment[]) => void;
   onCancel: () => void;
 }
 
 export function Composer({ busy, disabled, onSend, onCancel }: Props) {
   const [text, setText] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [capturing, setCapturing] = useState(false);
+  const [captureError, setCaptureError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const canSend = (text.trim().length > 0 || attachments.length > 0) && !busy && !disabled;
 
   const submit = (e?: FormEvent) => {
     e?.preventDefault();
-    const trimmed = text.trim();
-    if (!trimmed || busy || disabled) return;
-    onSend(trimmed);
+    if (!canSend) return;
+    onSend(text.trim(), attachments);
     setText("");
+    setAttachments([]);
     if (taRef.current) taRef.current.style.height = "auto";
   };
 
@@ -27,14 +38,52 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
     }
   };
 
+  const capture = async () => {
+    if (capturing || busy) return;
+    setCaptureError(null);
+    setCapturing(true);
+    try {
+      const r = await invoke<{ path: string; thumb_data_url: string }>("capture_screenshot");
+      setAttachments((a) => [...a, { path: r.path, thumb: r.thumb_data_url }]);
+    } catch (err) {
+      setCaptureError(String(err));
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  const removeAt = (i: number) => setAttachments((a) => a.filter((_, idx) => idx !== i));
+
   return (
     <div className="composer-wrap">
+      {captureError && <div className="capture-error">캡처 실패: {captureError}</div>}
+      {attachments.length > 0 && (
+        <div className="composer-attachments">
+          {attachments.map((a, i) => (
+            <div key={a.path} className="attach-chip">
+              <img src={a.thumb} alt="첨부 이미지" />
+              <button type="button" className="attach-remove" title="제거" onClick={() => removeAt(i)}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <form className="composer" onSubmit={submit}>
+        <button
+          type="button"
+          className="capture-btn"
+          title="스크린샷 첨부"
+          onClick={capture}
+          disabled={disabled || busy || capturing}
+        >
+          {capturing ? "…" : "📷"}
+        </button>
         <textarea
           ref={taRef}
           rows={1}
           value={text}
-          placeholder={disabled ? "모델 로딩 중…" : "무엇을 도와드릴까요? (예: 다운로드 폴더에서 PDF 찾아줘)"}
+          placeholder={disabled ? "모델 로딩 중…" : "무엇을 도와드릴까요? (📷 로 화면을 첨부할 수 있어요)"}
           onChange={(e) => {
             setText(e.target.value);
             e.target.style.height = "auto";
@@ -47,7 +96,7 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
             ■
           </button>
         ) : (
-          <button type="submit" className="send-btn" title="보내기" disabled={disabled || !text.trim()}>
+          <button type="submit" className="send-btn" title="보내기" disabled={!canSend}>
             ↑
           </button>
         )}
