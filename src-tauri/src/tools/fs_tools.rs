@@ -33,8 +33,23 @@ impl Tool for ListDir {
         if !Path::new(path).exists() {
             bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
         }
+        // 파일 경로가 오면 거부 대신 그 파일 1개의 정보를 돌려준다 — 거부+리다이렉트는
+        // 2B 를 read_file→image_info 연쇄 배회로 몰았다 (2026-06-12 R8 실측)
         if Path::new(path).is_file() {
-            bail!("{path} 는 파일입니다. 내용을 보려면 read_file 을 사용하세요.");
+            let meta = fs::metadata(path);
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = meta
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(fmt_time)
+                .unwrap_or_default();
+            let name = Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string());
+            return Ok(format!(
+                "type\tsize\tmodified\tname\nfile\t{size}\t{modified}\t{name}\n(이 경로는 폴더가 아니라 파일 1개입니다)"
+            ));
         }
         let mut lines = Vec::new();
         let mut total = 0usize;
@@ -147,7 +162,12 @@ impl Tool for WriteFile {
         })
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
-        let path = req_str(args, "path")?;
+        // 이름만 온 경로("memo.txt")는 워크스페이스로 흡수 (2026-06-12 R7 패턴)
+        let path = crate::tools::workspace::absorb_into_workspace(
+            req_str(args, "path")?,
+            &ctx.workspace(),
+        );
+        let path = &path.to_string_lossy().into_owned();
         let content = req_str(args, "content")?;
         let overwrite = opt_bool(args, "overwrite").unwrap_or(false);
         ensure_in_workspace(path, &ctx.workspace())?;
@@ -382,18 +402,31 @@ mod tests {
         }
     }
 
-    /// list_dir 에 파일 경로가 오면 read_file 로 안내한다 (배회 차단)
+    /// list_dir 에 파일 경로가 오면 거부 대신 그 파일 1개의 정보를 돌려준다 (흡수).
+    /// 거부+리다이렉트는 read_file→image_info 연쇄 배회를 유발했다 (2026-06-12 R8)
     #[test]
-    fn list_dir_on_file_redirects_to_read_file() {
+    fn list_dir_on_file_absorbs_with_single_entry() {
         let dir = tempdir().unwrap();
         let ctx = ctx_with_workspace(dir.path());
         let p = dir.path().join("x.txt");
-        std::fs::write(&p, "x").unwrap();
-        let err = ListDir
+        std::fs::write(&p, "xy").unwrap();
+        let out = ListDir
             .execute(&json!({"path": p.to_string_lossy()}), &ctx)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("read_file"), "{err}");
+            .unwrap();
+        assert!(out.contains("x.txt"), "{out}");
+        assert!(out.contains("파일 1개"), "{out}");
+    }
+
+    /// 이름만 온 write_file 경로는 워크스페이스로 흡수된다
+    #[test]
+    fn write_file_absorbs_bare_name_into_workspace() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let out = WriteFile
+            .execute(&json!({"path": "memo.txt", "content": "안녕"}), &ctx)
+            .unwrap();
+        assert!(out.contains("저장 완료"), "{out}");
+        assert!(dir.path().join("memo.txt").exists());
     }
 
     #[test]

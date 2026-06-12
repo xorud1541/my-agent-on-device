@@ -45,7 +45,8 @@ impl Tool for ZipCreate {
         }
 
         let out_path = match opt_str(args, "output_path") {
-            Some(o) => PathBuf::from(o),
+            // 이름만 온 출력 경로는 워크스페이스로 흡수 (2026-06-12 R7 패턴)
+            Some(o) => crate::tools::workspace::absorb_into_workspace(o, &ctx.workspace()),
             None => {
                 let first = &paths[0];
                 let stem = first
@@ -172,7 +173,8 @@ impl Tool for ZipExtract {
         }
 
         let out_dir = match opt_str(args, "output_dir") {
-            Some(o) => PathBuf::from(o),
+            // 이름만 온 출력 경로는 워크스페이스로 흡수 (2026-06-12 R7 패턴)
+            Some(o) => crate::tools::workspace::absorb_into_workspace(o, &ctx.workspace()),
             None => {
                 let p = Path::new(path);
                 let stem = p

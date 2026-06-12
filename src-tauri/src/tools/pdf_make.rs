@@ -380,7 +380,7 @@ impl Tool for ImagesToPdf {
                     "items": { "type": "string" },
                     "description": "이미지 절대경로 목록 (페이지 순서대로). dir 을 줬으면 생략"
                 },
-                "output_path": { "type": "string", "description": "생성할 .pdf 절대경로 — 생략하면 워크스페이스에 자동 이름으로 저장 (생략 권장)" },
+                "output_path": { "type": "string", "description": "생성할 .pdf 경로. 사용자가 파일 이름을 말했으면 그 이름을 그대로 쓴다. 생략하면 워크스페이스에 자동 이름으로 저장" },
                 "page_size": { "type": "string", "enum": ["a4", "letter", "fit"], "description": "페이지 크기 (기본 a4, fit=이미지 크기 그대로)" }
             },
             "required": []
@@ -410,7 +410,8 @@ impl Tool for ImagesToPdf {
         }
         let output = match opt_str(args, "output_path") {
             Some(s) => {
-                let mut p = PathBuf::from(s);
+                // 이름만 온 출력 경로("album.pdf")는 워크스페이스로 흡수 (2026-06-12 R7)
+                let mut p = crate::tools::workspace::absorb_into_workspace(s, &ctx.workspace());
                 // 작은 모델이 폴더 모양 경로(확장자 없음)를 주는 실수를 흡수한다
                 // (2026-06-11: ".alice\pdfs" 거부 → 모델이 경로 수정 못 하고 라운드 소진)
                 if p.extension().is_none() {

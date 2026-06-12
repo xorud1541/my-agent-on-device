@@ -3,6 +3,20 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 
+/// 상대경로/이름만 온 출력 경로를 워크스페이스 기준 절대경로로 흡수한다.
+/// 2B 는 "album.pdf" 처럼 이름만 주는 실수가 잦은데, 거부하면 경로를 고치지 못하고
+/// 의도를 무시한 우회로 빠진다 — 의도가 명백하므로(워크스페이스에 저장) 도구가
+/// 선의로 해석한다 (2026-06-12 R7 실측: output_path="album.pdf" 거부 → 자동 이름
+/// images.pdf 로 우회 저장 → 사용자가 말한 이름이 무시됨).
+pub fn absorb_into_workspace(path: &str, ws: &Path) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        ws.join(p)
+    }
+}
+
 /// 쓰기성 경로가 워크스페이스 안인지 검사한다. 위반 시 모델이 경로를 고쳐
 /// 재시도할 수 있는 한국어 오류를 돌려준다.
 ///

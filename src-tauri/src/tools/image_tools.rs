@@ -31,7 +31,9 @@ impl Tool for ImageInfo {
         }
         let meta =
             std::fs::metadata(path).with_context(|| format!("파일 정보 조회 실패: {path}"))?;
-        let img = image::image_dimensions(path).with_context(|| format!("이미지 아님: {path}"))?;
+        let img = image::image_dimensions(path).with_context(|| {
+            format!("이 파일은 이미지가 아닙니다: {path}. 이 사실을 그대로 사용자에게 알리세요.")
+        })?;
         let format = ImageFormat::from_path(path)
             .map(|f| format!("{f:?}"))
             .unwrap_or_else(|_| "unknown".into());
@@ -59,8 +61,8 @@ impl Tool for ImageTransform {
             "properties": {
                 "path": { "type": "string", "description": "원본 이미지 절대경로" },
                 "output_path": { "type": "string", "description": "저장할 경로 (생략 가능)" },
-                "resize_width": { "type": "integer", "description": "목표 가로 픽셀 (비율 유지)" },
-                "resize_height": { "type": "integer", "description": "목표 세로 픽셀 (비율 유지)" },
+                "resize_width": { "type": "integer", "description": "목표 가로(너비) 픽셀, 비율 유지. 사용자가 '가로 N으로'라고 하면 이 인자를 쓴다" },
+                "resize_height": { "type": "integer", "description": "목표 세로(높이) 픽셀, 비율 유지. 사용자가 '세로 N으로'라고 하면 이 인자를 쓴다" },
                 "rotate": { "type": "integer", "enum": [90, 180, 270], "description": "시계방향 회전 각도" },
                 "grayscale": { "type": "boolean", "description": "흑백 변환" },
                 "format": { "type": "string", "enum": ["png", "jpeg", "webp", "bmp"], "description": "출력 포맷" }
@@ -120,6 +122,11 @@ impl Tool for ImageTransform {
 
         let format = opt_str(args, "format");
         let out_path = resolve_output_path(path, opt_str(args, "output_path"), format)?;
+        // 이름만 온 출력 경로는 워크스페이스로 흡수 (2026-06-12 R7 패턴)
+        let out_path = crate::tools::workspace::absorb_into_workspace(
+            &out_path.to_string_lossy(),
+            &ctx.workspace(),
+        );
         ensure_in_workspace(&out_path.to_string_lossy(), &ctx.workspace())?;
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)?;

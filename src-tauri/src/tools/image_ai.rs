@@ -141,7 +141,8 @@ impl Tool for RemoveBackground {
         }
 
         let output = match opt_str(args, "output_path") {
-            Some(o) => PathBuf::from(o),
+            // 이름만 온 출력 경로는 워크스페이스로 흡수 (2026-06-12 R7 패턴)
+            Some(o) => crate::tools::workspace::absorb_into_workspace(o, &ctx.workspace()),
             None => {
                 let p = Path::new(input);
                 let stem = p.file_stem().context("잘못된 경로")?.to_string_lossy();
@@ -191,14 +192,22 @@ impl Tool for RemoveBackground {
     }
 }
 
-/// 확장자가 아닌 내용으로 포맷을 식별해 연다 (content-sniffing)
+/// 확장자가 아닌 내용으로 포맷을 식별해 연다 (content-sniffing).
+/// 디코드 실패 = 이미지가 아닌 파일 — 막다른 에러 대신 "사용자에게 알리라"는 지시를
+/// 담아 배회를 끊는다 (2026-06-12 R5 실측: txt 회전 요청에 디코드 실패만 반복).
 pub fn open_image_sniffed(path: &Path) -> Result<DynamicImage> {
     let img = image::ImageReader::open(path)
         .with_context(|| format!("이미지 열기 실패: {}", path.display()))?
         .with_guessed_format()
         .with_context(|| format!("이미지 형식 식별 실패: {}", path.display()))?
         .decode()
-        .with_context(|| format!("이미지 디코드 실패: {}", path.display()))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "이 파일은 이미지가 아니라서 이미지 작업(회전/리사이즈/변환)을 할 수 없습니다: {} ({e}). \
+                 이 사실을 그대로 사용자에게 알리세요.",
+                path.display()
+            )
+        })?;
     Ok(img)
 }
 

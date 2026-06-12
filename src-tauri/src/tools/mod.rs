@@ -161,13 +161,32 @@ pub(crate) fn opt_bool(args: &Value, key: &str) -> Option<bool> {
 /// 따른다 — 실패 인지→재계획/질문 흐름을 에러 텍스트가 직접 이끈다 (2026-06-12).
 pub(crate) fn not_found_msg(requested: &str, ws: &std::path::Path) -> String {
     let hint = not_found_hint(requested, ws);
-    if hint.is_empty() {
+    if !hint.is_empty() {
+        return format!("파일 없음: {requested}.{hint}");
+    }
+    // 유사 이름도 없으면 현재 폴더의 실제 목록을 후보로 보여준다 — 이름이 크게 다른
+    // 파일("cat.png" 요청, 실제 "새 파일 1.png")로 회복할 1라운드 기회를 만든다
+    // (2026-06-12 S1-t3: 목록 없이 즉시 질문 종결 → 바로 옆 파일을 두고 사용자에게 물음)
+    let names: Vec<String> = std::fs::read_dir(ws)
+        .map(|rd| {
+            rd.flatten()
+                .take(10)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
         format!(
-            "파일 없음: {requested}. 주변 폴더에서도 같은 이름을 찾지 못했습니다. \
-             다른 경로를 추측해 재시도하지 말고, 사용자에게 파일의 정확한 위치(폴더)를 물어보세요."
+            "파일 없음: {requested}. 주변 폴더에서도 같은 이름을 찾지 못했고 현재 폴더는 비어 \
+             있습니다. 다른 경로를 추측해 재시도하지 말고, 사용자에게 파일의 정확한 위치(폴더)를 물어보세요."
         )
     } else {
-        format!("파일 없음: {requested}.{hint}")
+        format!(
+            "파일 없음: {requested}. 현재 폴더에는 다음이 있습니다: {}. 요청한 파일이 이 중에 \
+             보이면 그 이름으로 다시 시도하고, 없으면 다른 경로를 추측하지 말고 사용자에게 \
+             파일의 정확한 위치(폴더)를 물어보세요.",
+            names.join(", ")
+        )
     }
 }
 
@@ -262,6 +281,18 @@ mod tests {
         let msg = not_found_msg(&dir.path().join("유니콘.pdf").to_string_lossy(), dir.path());
         assert!(msg.contains("물어보세요"), "{msg}");
         assert!(msg.contains("추측"), "재시도 배회 금지 지시 없음: {msg}");
+    }
+
+    /// 유사 이름조차 없으면 현재 폴더의 실제 파일 목록을 후보로 제시한다
+    /// (2026-06-12 S1-t3: "cat.png" 요청, 실제 "새 파일 1.png" — 목록이 회복 단서)
+    #[test]
+    fn not_found_msg_lists_current_folder_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("새 파일 1.png"), "img").unwrap();
+        let msg = not_found_msg(&dir.path().join("cat.png").to_string_lossy(), dir.path());
+        assert!(msg.contains("새 파일 1.png"), "{msg}");
+        assert!(msg.contains("다시 시도"), "{msg}");
+        assert!(msg.contains("물어보세요"), "{msg}");
     }
 
     /// 주변에 같은 이름이 있으면 질문 대신 그 경로로 재시도를 지시한다

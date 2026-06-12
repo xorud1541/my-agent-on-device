@@ -116,6 +116,10 @@ pub fn tools_to_exclude(user_text: &str) -> Vec<&'static str> {
             // (2026-06-12 실로그: "압축파일 모두 지워봐" → 폴더를 zip_extract).
             // zip_create 는 "압축해서 원본 지워줘" 복합을 위해 남겨둔다.
             v.push("zip_extract");
+        } else if is_compress_intent(user_text) {
+            // 압축 생성 의도에서 만든 zip 을 곧장 zip_extract 로 되푸는 배회 차단
+            // (2026-06-12 R6 실측: a.zip 생성 직후 해제 + 환각 b.zip 해제 시도)
+            v.push("zip_extract");
         }
         v
     };
@@ -139,6 +143,12 @@ pub fn tools_to_exclude(user_text: &str) -> Vec<&'static str> {
 /// "압축 풀어/해제" 류의 압축 해제 의도인가?
 fn is_extract_intent(user_text: &str) -> bool {
     user_text.contains("압축") && (user_text.contains("풀") || user_text.contains("해제"))
+}
+
+/// "압축해/압축하" 류의 압축 생성 의도인가? (해제 의도는 is_extract_intent 가 먼저 가로챈다.
+/// "압축파일 안에 뭐 있어?" 같은 내용 조회는 동사가 없어 매칭되지 않는다 — list_only 보존)
+fn is_compress_intent(user_text: &str) -> bool {
+    user_text.contains("압축해") || user_text.contains("압축하")
 }
 
 /// "지워/삭제" 류의 삭제 의도인가?
@@ -408,6 +418,10 @@ pub async fn run_turn(
     let mut empty_retry_left = 1u32;
     // 연속으로 "성공이 하나도 없었던" 라운드 수 — MAX_REJECTED_ROUNDS 에서 강제 마무리
     let mut rejected_rounds = 0u32;
+    // 이번 턴에 쓰기성 도구가 성공했는가 — 합성 폴백이 "전부 실패"와 "일부 완료 후
+    // 실패"를 구분해 거짓 없는 문장을 고르는 근거 (2026-06-12 R6: 압축 성공 후
+    // 배회 실패로 끝난 턴에 "파일을 찾지 못했어요" 질문만 나가 사용자를 혼란시킴)
+    let mut turn_had_write_success = false;
     // 성공이 이어지는 한 계속 진행하되, 폭주는 절대 상한에서 끊는다
     let hard_cap = max_tool_rounds.saturating_mul(HARD_CAP_FACTOR).max(max_tool_rounds);
 
@@ -526,8 +540,12 @@ pub async fn run_turn(
                 looping_tools.insert(call.function.name.clone());
                 (false, "이미 같은 인자로 호출한 도구입니다. 위의 기존 결과를 사용하거나 다른 행동을 취하세요.".to_string())
             } else {
-                let args: Value = serde_json::from_str(&call.function.arguments)
+                let mut args: Value = serde_json::from_str(&call.function.arguments)
                     .unwrap_or(Value::Object(Default::default()));
+                // 발화/경로 기반 인자 보정 — 2B 의 알려진 실수를 실행 직전에 흡수
+                absorb_relative_path_args(&mut args, &tool_ctx.workspace());
+                fix_resize_axis(&user_text, &call.function.name, &mut args);
+                inject_named_output(&user_text, &call.function.name, &mut args);
                 // 도구는 동기 구현 — 블로킹 실행을 런타임에 알린다
                 let output = tokio::task::block_in_place(|| {
                     registry.execute(&call.function.name, &args, tool_ctx)
@@ -540,6 +558,7 @@ pub async fn run_turn(
             any_success |= ok;
             // 쓰기 도구 성공 = 상태 변화 → 읽기 도구의 중복 기록/루프 숨김을 풀어준다
             if ok && !READ_ONLY_TOOLS.contains(&call.function.name.as_str()) {
+                turn_had_write_success = true;
                 executed.retain(|(n, _)| !READ_ONLY_TOOLS.contains(&n.as_str()));
                 looping_tools.retain(|n| !READ_ONLY_TOOLS.contains(&n.as_str()));
             }
@@ -570,13 +589,20 @@ pub async fn run_turn(
         // 라운드는 더 배회시키지 않고 즉시 마무리로 보낸다. 2B 는 에러 속 질문 지시를
         // 무시하고 다른 도구로 샌다 (2026-06-12 R2 실측: list_dir 배회 → 빈 마무리 →
         // 무의미한 중단 안내). 지시는 약하고 도구 노출 제어가 결정적이라는 동일 교훈.
-        let any_ask_user = messages
+        // "사용자에게 알리세요" 마커(불가능 작업 — 이미지 아님 등 회복 불가)는 즉시
+        // 배회를 끊는다 (2026-06-12 R5). 단, "물어보세요"(파일 못 찾음)는 즉시 끊지
+        // 않는다 — 에러에 담긴 현재 폴더 후보 목록으로 회복할 1라운드를 보장한다
+        // (2026-06-12 S1-t3 회귀: 즉시 종결이 바로 옆 파일을 두고 사용자에게 물었음).
+        // 회복 실패 시엔 rejected_rounds 가 마무리하고, 합성 질문 폴백이 동일하게 적용된다.
+        let any_tell_user = messages
             .iter()
             .rev()
             .take(result.tool_calls.len())
             .any(|m| {
                 m.role == "tool"
-                    && m.content.as_deref().is_some_and(|c| c.contains("물어보세요"))
+                    && m.content
+                        .as_deref()
+                        .is_some_and(|c| c.contains("사용자에게 알리세요"))
             });
         if any_success {
             rejected_rounds = 0;
@@ -584,7 +610,7 @@ pub async fn run_turn(
             rejected_rounds += 1;
         }
         let must_finish = rejected_rounds >= MAX_REJECTED_ROUNDS
-            || (!any_success && !any_hint && any_ask_user);
+            || (!any_success && !any_hint && any_tell_user);
         if must_finish && !cancel.load(Ordering::Relaxed) {
             let no_tools = Value::Array(vec![]);
             let mut final_result = client.complete(messages, &no_tools, temperature, &mut sink).await?;
@@ -592,19 +618,28 @@ pub async fn run_turn(
             strip_tool_markup(&mut final_result.content);
             if !final_result.content.is_empty() {
                 messages.push(ChatMessage::assistant(Some(final_result.content), None));
-            } else if let Some(q) = synthesize_location_question(messages) {
-                // 마무리 호출마저 비면 마지막 '파일 없음' 에러에서 결정적 질문을 합성한다 —
-                // 모델이 질문을 작문하지 못해도 사용자는 항상 다음 행동(위치 제공)을 안내받는다.
-                emit(AgentEvent::TextDelta {
-                    session_id: session_id.to_string(),
-                    delta: q.clone(),
-                });
-                messages.push(ChatMessage::assistant(Some(q), None));
             } else {
-                emit(AgentEvent::Error {
-                    session_id: session_id.to_string(),
-                    message: "도구 실행이 진전 없이 반복되어 작업을 중단했습니다. 요청을 바꿔 다시 시도해보세요.".into(),
-                });
+                // 마무리 호출마저 비면 결정적 폴백을 합성한다 — 모델이 문장을 작문하지
+                // 못해도 사용자는 항상 정직한 상태 보고(질문/실패 이유)를 받는다.
+                let note = if !turn_had_write_success {
+                    synthesize_location_question(messages)
+                } else {
+                    None // 일부 완료된 턴에 "못 찾았어요" 질문만 나가면 혼란 (R6)
+                }
+                .or_else(|| synthesize_failure_note(messages, turn_had_write_success));
+                match note {
+                    Some(q) => {
+                        emit(AgentEvent::TextDelta {
+                            session_id: session_id.to_string(),
+                            delta: q.clone(),
+                        });
+                        messages.push(ChatMessage::assistant(Some(q), None));
+                    }
+                    None => emit(AgentEvent::Error {
+                        session_id: session_id.to_string(),
+                        message: "도구 실행이 진전 없이 반복되어 작업을 중단했습니다. 요청을 바꿔 다시 시도해보세요.".into(),
+                    }),
+                }
             }
             break;
         }
@@ -632,25 +667,152 @@ pub async fn run_turn(
     Ok(())
 }
 
+/// 상대 경로 인자를 워크스페이스 기준 절대경로로 흡수한다. 2B 는 직전 list_dir 결과가
+/// 보여준 이름("1.png")을 그대로 인자에 베껴 쓴다 — 거부하면 배회로 빠지므로 의도가
+/// 명백한 상대 이름은 워크스페이스로 해석한다 (2026-06-12 R7 실측: paths=["1.png",...]
+/// 검증 실패 → image_info 우회 → 중복 → zip_create 대체 행동까지 연쇄).
+fn absorb_relative_path_args(args: &mut Value, ws: &std::path::Path) {
+    const PATH_KEYS: &[&str] = &["path", "from", "to", "dir", "root", "output_path", "output_dir"];
+    let to_abs = |s: &str| -> Option<String> {
+        let t = s.trim();
+        if t.is_empty() || !std::path::Path::new(t).is_relative() {
+            return None;
+        }
+        Some(ws.join(t).to_string_lossy().replace('\\', "/"))
+    };
+    let Some(obj) = args.as_object_mut() else { return };
+    for k in PATH_KEYS {
+        let fixed = obj.get(*k).and_then(Value::as_str).and_then(to_abs);
+        if let Some(p) = fixed {
+            obj.insert((*k).to_string(), Value::String(p));
+        }
+    }
+    // paths: 배열(images_to_pdf) 또는 쉼표 문자열(zip_create)
+    match obj.get_mut("paths") {
+        Some(Value::Array(items)) => {
+            for it in items.iter_mut() {
+                if let Some(p) = it.as_str().and_then(to_abs) {
+                    *it = Value::String(p);
+                }
+            }
+        }
+        Some(Value::String(s)) => {
+            // 모델이 JSON 배열을 문자열로 감싼 실수도 흡수: "[\"a.png\", \"b.png\"]"
+            let parts: Vec<String> = serde_json::from_str::<Vec<String>>(s)
+                .unwrap_or_else(|_| s.split(',').map(|p| p.trim().to_string()).collect());
+            *s = parts
+                .iter()
+                .filter(|p| !p.is_empty())
+                .map(|p| to_abs(p).unwrap_or_else(|| p.clone()))
+                .collect::<Vec<_>>()
+                .join(",");
+        }
+        _ => {}
+    }
+}
+
+/// 발화-인자 불일치 교정: 사용자가 '가로'만 말했는데 모델이 resize_height 를 준 경우
+/// (또는 반대) 축을 바꿔 실행한다. 2B 는 가로/세로 → width/height 의미 매핑에 일관되게
+/// 실패하며 스키마 설명 보강으로도 교정되지 않는다 (2026-06-12 R4/R9 실측 — 설명에
+/// "'가로 N으로' 요청은 이것"을 명시해도 resize_height 선택, 300px 를 400 으로 확대).
+fn fix_resize_axis(user_text: &str, tool: &str, args: &mut Value) {
+    if tool != "image_transform" {
+        return;
+    }
+    let (says_w, says_h) = (user_text.contains("가로"), user_text.contains("세로"));
+    let Some(obj) = args.as_object_mut() else { return };
+    if says_w && !says_h {
+        if let Some(v) = obj.remove("resize_height") {
+            obj.entry("resize_width").or_insert(v);
+        }
+    } else if says_h && !says_w {
+        if let Some(v) = obj.remove("resize_width") {
+            obj.entry("resize_height").or_insert(v);
+        }
+    }
+}
+
+/// 사용자가 출력 파일명(".pdf"/".zip" 토큰)을 말했는데 모델이 output_path 를 생략한
+/// 경우 그 이름을 주입한다 (2026-06-12 R7 실측: "album.pdf로 만들어줘" → output_path
+/// 생략 → 자동 이름 images.pdf 저장 후 "album.pdf로 저장했다"고 거짓 보고).
+fn inject_named_output(user_text: &str, tool: &str, args: &mut Value) {
+    let ext = match tool {
+        "images_to_pdf" => "pdf",
+        "zip_create" => "zip",
+        _ => return,
+    };
+    let Some(obj) = args.as_object_mut() else { return };
+    let has_output = obj
+        .get("output_path")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if has_output {
+        return;
+    }
+    let Some(name) = filename_with_ext(user_text, ext) else { return };
+    // 입력 인자에 이미 등장하는 이름이면 출력 의도가 아니다 (입력 파일명 오인 방지)
+    let inputs = format!(
+        "{} {}",
+        obj.get("paths").map(|v| v.to_string()).unwrap_or_default(),
+        obj.get("dir").map(|v| v.to_string()).unwrap_or_default()
+    );
+    if inputs.contains(&name) {
+        return;
+    }
+    // 이름만 넣는다 — 도구의 absorb_into_workspace 가 워크스페이스 절대경로로 해석
+    obj.insert("output_path".into(), Value::String(name));
+}
+
+/// 텍스트에서 ".{ext}" 로 끝나는 파일명 토큰을 추출한다 ("album.pdf로 만들어줘" → "album.pdf")
+fn filename_with_ext(text: &str, ext: &str) -> Option<String> {
+    let needle = format!(".{ext}");
+    let pos = text.find(&needle)?;
+    let end = pos + needle.len();
+    // 확장자 뒤가 영숫자로 이어지면(예: "a.pdfx") 파일명 토큰이 아니다.
+    // 한글 조사("album.pdf로")는 정상적인 후행이므로 ASCII 만 검사한다.
+    if text[end..].chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let head: String = text[..pos]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-') || ('가'..='힣').contains(c))
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if head.is_empty() {
+        return None;
+    }
+    Some(format!("{head}{needle}"))
+}
+
 /// 직근 도구 결과의 "파일 없음: <경로>. ... 물어보세요" 에러에서 파일명을 뽑아
 /// 사용자에게 위치를 묻는 문장을 만든다. 강제 마무리가 빈 완성으로 끝났을 때의
 /// 결정적 폴백 — 2B 가 질문을 작문하지 못해도 대화가 회복 가능한 상태로 끝난다.
 fn synthesize_location_question(messages: &[ChatMessage]) -> Option<String> {
-    let content = messages
+    let marker_errors: Vec<&str> = messages
         .iter()
         .rev()
         .filter(|m| m.role == "tool")
         .filter_map(|m| m.content.as_deref())
-        .find(|c| c.contains("물어보세요"))?;
-    let name = content
-        .split("파일 없음:")
-        .nth(1)
-        .map(|rest| rest.trim_start())
-        .and_then(|rest| rest.split(". 주변").next())
-        .and_then(|path| std::path::Path::new(path.trim()).file_name())
-        .map(|n| n.to_string_lossy().into_owned());
+        .filter(|c| c.contains("물어보세요"))
+        .collect();
+    if marker_errors.is_empty() {
+        return None;
+    }
+    // "파일 없음: <경로>. ..." 에서 파일명 추출 (문장 마침표 ". " 가 경로의 끝)
+    let extract = |content: &str| -> Option<String> {
+        content
+            .split("파일 없음:")
+            .nth(1)
+            .map(|rest| rest.trim_start())
+            .and_then(|rest| rest.split(". ").next())
+            .and_then(|path| std::path::Path::new(path.trim()).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+    };
     // 모델이 인자 파일명을 환각하기도 한다 (2026-06-12 R2: '발표자료.pdf' →
-    // 'final_report.pdf' 로 영문화). 사용자가 실제로 말한 이름일 때만 질문에 쓴다.
+    // 'final_report.pdf' 로 영문화). 사용자가 실제로 말한 이름을 우선해 질문에 쓴다.
     let user_text = messages
         .iter()
         .rev()
@@ -664,11 +826,33 @@ fn synthesize_location_question(messages: &[ChatMessage]) -> Option<String> {
             .unwrap_or_else(|| n.to_string());
         user_text.contains(n) || user_text.contains(&stem)
     };
+    let name = marker_errors
+        .iter()
+        .filter_map(|c| extract(c))
+        .find(|n| user_said(n));
     Some(match name {
-        Some(n) if user_said(&n) => {
+        Some(n) => {
             format!("'{n}' 파일을 찾지 못했어요. 어느 폴더에 있는지 알려주시면 다시 시도할게요.")
         }
-        _ => "요청하신 파일을 찾지 못했어요. 정확한 위치(폴더)를 알려주시겠어요?".into(),
+        None => "요청하신 파일을 찾지 못했어요. 정확한 위치(폴더)를 알려주시겠어요?".into(),
+    })
+}
+
+/// 마지막 도구 오류에서 정직한 실패 보고를 합성한다 — "완료되지 않은 채 중단" 같은
+/// 무의미한 안내 대신 실패 이유가 사용자에게 전달된다 (2026-06-12 R5/R8 실측).
+/// 쓰기 성공이 있었던 턴은 "일부 완료"를 명시해 거짓 없는 문장을 유지한다.
+fn synthesize_failure_note(messages: &[ChatMessage], had_success: bool) -> Option<String> {
+    let err = messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.content.as_deref())
+        .find(|c| c.starts_with("오류:"))?;
+    let reason = clip(err.trim_start_matches("오류:").trim(), 140);
+    Some(if had_success {
+        format!("요청 중 일부는 완료했지만 마지막 단계는 실패했어요. 이유: {reason}")
+    } else {
+        format!("요청하신 작업을 완료하지 못했어요. 이유: {reason}")
     })
 }
 
@@ -901,7 +1085,7 @@ mod tests {
     }
 
     /// 도구가 연속 2라운드 전부 실패하면 한도까지 끌지 않고 그 시점에 마무리한다.
-    /// (ask-user 마커가 없는 일반 실패 — 파일 경로에 list_dir — 로 검증한다.
+    /// (ask-user 마커가 없는 일반 실패 — zip 아닌 파일에 zip_extract — 로 검증한다.
     ///  '파일 없음+물어보세요' 실패는 1라운드 만에 끝나는 별도 경로가 있다)
     #[tokio::test(flavor = "multi_thread")]
     async fn consecutive_failed_rounds_finish_early() {
@@ -911,8 +1095,8 @@ mod tests {
         std::fs::write(&f1, "1").unwrap();
         std::fs::write(&f2, "2").unwrap();
         let client = MockClient::ok(vec![
-            tool_call_result("list_dir", serde_json::json!({"path": f1.to_string_lossy()})),
-            tool_call_result("list_dir", serde_json::json!({"path": f2.to_string_lossy()})),
+            tool_call_result("zip_extract", serde_json::json!({"path": f1.to_string_lossy()})),
+            tool_call_result("zip_extract", serde_json::json!({"path": f2.to_string_lossy()})),
             // 강제 마무리(무도구) 응답
             CompletionResult { content: "파일을 찾지 못했습니다.".into(), ..Default::default() },
         ]);
@@ -966,15 +1150,16 @@ mod tests {
     ///  모델이 멋대로 이어함 — 미완 흔적이 다음 턴을 오염)
     #[tokio::test(flavor = "multi_thread")]
     async fn aborted_turn_leaves_explicit_closure_message() {
-        // 전부 실패하는 호출 2라운드(마커 없는 일반 실패) → 강제 마무리도 빈 응답 → 에러로 중단
+        // 전부 실패하는 호출 2라운드(마커 없는 일반 실패) → 강제 마무리도 빈 응답
+        // → 실패 노트 합성으로 정직하게 종결
         let dir = tempfile::tempdir().unwrap();
         let f1 = dir.path().join("a.txt");
         let f2 = dir.path().join("b.txt");
         std::fs::write(&f1, "1").unwrap();
         std::fs::write(&f2, "2").unwrap();
         let client = MockClient::ok(vec![
-            tool_call_result("list_dir", serde_json::json!({"path": f1.to_string_lossy()})),
-            tool_call_result("list_dir", serde_json::json!({"path": f2.to_string_lossy()})),
+            tool_call_result("zip_extract", serde_json::json!({"path": f1.to_string_lossy()})),
+            tool_call_result("zip_extract", serde_json::json!({"path": f2.to_string_lossy()})),
             CompletionResult::default(), // 강제 마무리 응답이 빈 완성
         ]);
         let registry = ToolRegistry::with_default_tools();
@@ -987,10 +1172,11 @@ mod tests {
 
         let last = messages.last().unwrap();
         assert_eq!(last.role, "assistant", "중단 턴도 assistant 종결로 끝나야 함");
+        // 빈 마무리는 이제 실패 노트로 합성된다 — 미완/실패가 명시돼야 한다
+        let text = last.content.as_deref().unwrap_or("");
         assert!(
-            last.content.as_deref().unwrap_or("").contains("완료되지 않"),
-            "미완 명시 없음: {:?}",
-            last.content
+            text.contains("완료하지 못했") || text.contains("완료되지 않"),
+            "미완 명시 없음: {text:?}"
         );
     }
 
@@ -1046,15 +1232,15 @@ mod tests {
         std::fs::write(&real, "내용").unwrap();
 
         let wrong = ws.join("data.txt").to_string_lossy().to_string();
-        // r2 실패는 ask-user 마커가 없는 종류여야 한다 (파일 경로에 list_dir)
+        // r2 실패는 ask-user 마커가 없는 종류여야 한다 (zip 아닌 파일에 zip_extract)
         let dummy = ws.join("dummy.txt");
         std::fs::write(&dummy, "d").unwrap();
         let missing_dir = dummy.to_string_lossy().to_string();
         let client = MockClient::ok(vec![
             // r1: 파일 없음 + 위치 힌트 (read_file 의 not_found_hint 가 부모에서 발견)
             tool_call_result("read_file", serde_json::json!({"path": wrong})),
-            // r2: 힌트와 무관한 실패 (파일에 list_dir) — 기존 정책이면 여기서 조기중단
-            tool_call_result("list_dir", serde_json::json!({"path": missing_dir})),
+            // r2: 힌트와 무관한 실패 (zip 아닌 파일에 zip_extract) — 기존 정책이면 여기서 조기중단
+            tool_call_result("zip_extract", serde_json::json!({"path": missing_dir})),
             // r3: 힌트의 경로로 재시도 — 이 라운드까지 살아 있어야 한다
             tool_call_result("read_file", serde_json::json!({"path": real.to_string_lossy()})),
             CompletionResult { content: "내용 확인 완료.".into(), ..Default::default() },
@@ -1077,43 +1263,19 @@ mod tests {
         );
     }
 
-    /// "주변에서도 못 찾음 — 물어보세요" 에러(not_found_msg)가 나온 실패 라운드는
-    /// 라운드 예산을 더 태우지 않고 즉시 도구를 뗀 마무리로 보낸다.
-    /// (2026-06-12 R2 실측: 에러 속 질문 지시를 무시하고 list_dir 로 배회 → 빈 마무리)
-    #[tokio::test(flavor = "multi_thread")]
-    async fn ask_user_error_finishes_immediately_without_wandering() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("발표자료.pdf").to_string_lossy().to_string();
-        let client = MockClient::ok(vec![
-            tool_call_result("read_file", serde_json::json!({"path": missing})),
-            // 강제 마무리 응답 (이 호출이 도구 없이 나가야 한다)
-            CompletionResult { content: "발표자료.pdf 를 찾지 못했어요. 어디에 있나요?".into(), ..Default::default() },
-        ]);
-        let registry = ToolRegistry::with_default_tools();
-        let mut cfg = AppConfig::default();
-        cfg.workspace_dir = dir.path().to_string_lossy().into_owned();
-        let ctx = ToolCtx::noop(cfg);
-        let mut messages = vec![ChatMessage::user("발표자료.pdf 요약해줘")];
-        let cancel = AtomicBool::new(false);
-
-        run_turn(&client, &registry, &ctx, &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
-            .await
-            .unwrap();
-
-        let counts = client.tool_counts.lock().unwrap().clone();
-        assert_eq!(counts.len(), 2, "물어보라 에러 후 즉시 마무리 (배회 라운드 없음)");
-        assert_eq!(counts[1], 0, "마무리 호출은 도구 없이");
-        assert!(messages.last().unwrap().content.as_deref().unwrap().contains("어디"));
-    }
-
-    /// 강제 마무리가 빈 완성이면 마지막 '파일 없음' 에러에서 위치 질문을 합성한다 —
-    /// 모델이 질문을 작문하지 못해도 사용자는 항상 다음 행동을 안내받는다.
+    /// "주변에서도 못 찾음 — 물어보세요" 실패는 후보 목록으로 회복할 1라운드를 받고,
+    /// 그래도 실패하면 강제 마무리에서 위치 질문이 합성된다 — 모델이 질문을 작문하지
+    /// 못해도 사용자는 항상 다음 행동(위치 제공)을 안내받는다.
+    /// (즉시 종결은 S1-t3 회귀를 만들었다: 바로 옆 파일을 두고 사용자에게 물음)
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_forced_finish_synthesizes_location_question() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("발표자료.pdf").to_string_lossy().to_string();
+        let missing2 = dir.path().join("발표자료2.pdf").to_string_lossy().to_string();
         let client = MockClient::ok(vec![
             tool_call_result("read_file", serde_json::json!({"path": missing})),
+            // 회복 라운드도 실패 → rejected_rounds 로 강제 마무리
+            tool_call_result("read_file", serde_json::json!({"path": missing2})),
             CompletionResult::default(), // 강제 마무리가 빈 완성
         ]);
         let registry = ToolRegistry::with_default_tools();
@@ -1167,6 +1329,159 @@ mod tests {
             .unwrap();
 
         assert_eq!(messages.last().unwrap().content.as_deref(), Some("내용 확인."));
+    }
+
+    /// 마커 없는 실패로 끝난 빈 마무리는 마지막 오류에서 정직한 실패 노트를 합성한다
+    /// (2026-06-12 R5: "완료되지 않은 채 중단" 무의미 안내 대신 이유가 전달돼야 함)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_forced_finish_synthesizes_failure_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1").unwrap();
+        std::fs::write(&f2, "2").unwrap();
+        let client = MockClient::ok(vec![
+            tool_call_result("zip_extract", serde_json::json!({"path": f1.to_string_lossy()})),
+            tool_call_result("zip_extract", serde_json::json!({"path": f2.to_string_lossy()})),
+            CompletionResult::default(), // 강제 마무리가 빈 완성
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut messages = vec![ChatMessage::user("압축 좀 풀어줘")];
+        let events = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
+
+        let answer = messages.last().unwrap().content.as_deref().unwrap();
+        assert!(answer.contains("완료하지 못했어요"), "{answer}");
+        assert!(answer.contains("zip"), "실패 이유가 담겨야 함: {answer}");
+    }
+
+    /// 불가능 작업("txt 회전") — 이미지 디코드 실패 에러의 '알리세요' 마커가
+    /// 1라운드 만에 배회를 끊고 정직한 실패로 종결시킨다 (2026-06-12 R5)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn impossible_image_op_finishes_in_one_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, "메모").unwrap();
+        let client = MockClient::ok(vec![
+            tool_call_result(
+                "image_transform",
+                serde_json::json!({"path": txt.to_string_lossy(), "rotate": 90}),
+            ),
+            CompletionResult::default(), // 강제 마무리가 빈 완성 → 실패 노트 합성
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut cfg = AppConfig::default();
+        cfg.workspace_dir = dir.path().to_string_lossy().into_owned();
+        let ctx = ToolCtx::noop(cfg);
+        let mut messages = vec![ChatMessage::user("notes.txt를 90도 회전시켜줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &ctx, &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        let counts = client.tool_counts.lock().unwrap().clone();
+        assert_eq!(counts.len(), 2, "알리세요 마커 후 즉시 마무리");
+        let answer = messages.last().unwrap().content.as_deref().unwrap();
+        assert!(answer.contains("이미지가 아니"), "실패 이유 전달: {answer}");
+    }
+
+    /// 압축 생성 의도 턴에는 zip_extract 를 숨긴다 (2026-06-12 R6: 만든 zip 을 곧장
+    /// 해제 + 환각 zip 해제 시도). 해제/조회 의도는 건드리지 않는다.
+    #[test]
+    fn compress_intent_excludes_zip_extract() {
+        assert!(tools_to_exclude("photos 폴더 압축해줘").contains(&"zip_extract"));
+        assert!(tools_to_exclude("이미지들 압축해서 보관해줘").contains(&"zip_extract"));
+        assert!(!tools_to_exclude("백업.zip 압축 풀어줘").contains(&"zip_extract"));
+        assert!(!tools_to_exclude("압축 해제해줘").contains(&"zip_extract"));
+        assert!(!tools_to_exclude("백업.zip 안에 뭐 있어?").contains(&"zip_extract"));
+    }
+
+    /// 상대 경로 인자는 워크스페이스 기준으로 흡수된다 (2026-06-12 R7: list_dir 가
+    /// 보여준 "1.png" 를 그대로 베껴 쓴 paths 배열이 검증 실패 → 배회 연쇄)
+    #[test]
+    fn relative_path_args_are_absorbed_into_workspace() {
+        let ws = std::path::Path::new("C:/ws");
+        // 단일 path 키
+        let mut args = serde_json::json!({"path": "1.png"});
+        absorb_relative_path_args(&mut args, ws);
+        assert_eq!(args["path"], "C:/ws/1.png");
+        // 절대경로는 보존
+        let mut args = serde_json::json!({"path": "D:/other/x.png"});
+        absorb_relative_path_args(&mut args, ws);
+        assert_eq!(args["path"], "D:/other/x.png");
+        // 배열 paths (images_to_pdf)
+        let mut args = serde_json::json!({"paths": ["1.png", "C:/abs/2.png"]});
+        absorb_relative_path_args(&mut args, ws);
+        assert_eq!(args["paths"][0], "C:/ws/1.png");
+        assert_eq!(args["paths"][1], "C:/abs/2.png");
+        // JSON 배열을 문자열로 감싼 실수 (zip_create)
+        let mut args = serde_json::json!({"paths": "[\"1.png\", \"2.png\"]"});
+        absorb_relative_path_args(&mut args, ws);
+        assert_eq!(args["paths"], "C:/ws/1.png,C:/ws/2.png");
+        // 쉼표 문자열
+        let mut args = serde_json::json!({"paths": "a.png, C:/abs/b.png"});
+        absorb_relative_path_args(&mut args, ws);
+        assert_eq!(args["paths"], "C:/ws/a.png,C:/abs/b.png");
+    }
+
+    /// 사용자가 '가로'만 말했는데 모델이 resize_height 를 주면 축을 교체한다
+    /// (2026-06-12 R4/R9: 스키마 설명 보강으로도 교정 실패한 의미 매핑 혼동)
+    #[test]
+    fn resize_axis_fix_swaps_mismatched_dimension() {
+        let mut args = serde_json::json!({"path": "a.png", "resize_height": 800});
+        fix_resize_axis("photo.png 가로 800으로 줄여줘", "image_transform", &mut args);
+        assert_eq!(args["resize_width"], 800);
+        assert!(args.get("resize_height").is_none());
+
+        let mut args = serde_json::json!({"path": "a.png", "resize_width": 600});
+        fix_resize_axis("세로 600으로 맞춰줘", "image_transform", &mut args);
+        assert_eq!(args["resize_height"], 600);
+
+        // 둘 다 말했거나 아무것도 안 말했으면 건드리지 않는다
+        let mut args = serde_json::json!({"resize_height": 800});
+        fix_resize_axis("가로 800 세로 600으로", "image_transform", &mut args);
+        assert_eq!(args["resize_height"], 800);
+        let mut args = serde_json::json!({"resize_height": 800});
+        fix_resize_axis("800으로 줄여줘", "image_transform", &mut args);
+        assert_eq!(args["resize_height"], 800);
+    }
+
+    /// 사용자가 말한 출력 파일명(.pdf/.zip)을 모델이 생략하면 주입한다 (2026-06-12 R7)
+    #[test]
+    fn named_output_is_injected_when_model_omits_it() {
+        let mut args = serde_json::json!({"dir": "C:/ws"});
+        inject_named_output("이미지들 묶어서 album.pdf로 만들어줘", "images_to_pdf", &mut args);
+        assert_eq!(args["output_path"], "album.pdf");
+
+        // 모델이 이미 지정했으면 존중
+        let mut args = serde_json::json!({"dir": "C:/ws", "output_path": "C:/ws/모음.pdf"});
+        inject_named_output("이미지들 묶어서 album.pdf로", "images_to_pdf", &mut args);
+        assert_eq!(args["output_path"], "C:/ws/모음.pdf");
+
+        // 발화의 .zip 토큰이 입력 인자에 이미 있으면 출력 의도가 아니다
+        let mut args = serde_json::json!({"paths": "C:/ws/photos.zip"});
+        inject_named_output("photos.zip 다시 압축해줘", "zip_create", &mut args);
+        assert!(args.get("output_path").is_none());
+
+        // 파일명 토큰이 없으면 주입하지 않는다
+        let mut args = serde_json::json!({"paths": "C:/ws/a.png"});
+        inject_named_output("zip으로 압축해줘", "zip_create", &mut args);
+        assert!(args.get("output_path").is_none());
+    }
+
+    #[test]
+    fn filename_extraction_handles_korean_and_particles() {
+        assert_eq!(filename_with_ext("앨범사진.pdf로 만들어줘", "pdf").as_deref(), Some("앨범사진.pdf"));
+        assert_eq!(filename_with_ext("result-1.zip 으로 묶어", "zip").as_deref(), Some("result-1.zip"));
+        assert_eq!(filename_with_ext("pdf로 만들어줘", "pdf"), None);
+        assert_eq!(filename_with_ext("a.pdfx 처리해", "pdf"), None);
     }
 
     #[test]
