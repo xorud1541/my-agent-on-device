@@ -31,11 +31,16 @@ impl LlamaServer {
             "--port", &cfg.port.to_string(),
             "--host", "127.0.0.1",
             "-ngl", &cfg.n_gpu_layers.to_string(),
-            "--device", &cfg.device,
             "-c", &cfg.ctx_size.to_string(),
             "--jinja",
             "--no-webui",
         ]);
+        // 디바이스가 지정된 경우에만 --device 부착.
+        // Windows=Vulkan0 명시, macOS Metal·Linux=빈 값 → 인자 생략 후 자동 선택(-ngl 오프로드).
+        // (빈 값으로 `--device ""` 를 넘기면 llama-server 가 즉시 죽는다)
+        if !cfg.device.trim().is_empty() {
+            cmd.args(["--device", &cfg.device]);
+        }
         if cfg.reasoning_budget == 0 {
             // 사고 비활성화: 강제 사고 종료 후 즉시 EOS 가 나오는 불안정 경로 자체를 제거.
             // Qwen3.5-2B 기준 사고 없이도 한국어 툴콜 5/5, 호출당 1~5초 (bench 참고)

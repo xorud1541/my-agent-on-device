@@ -11,7 +11,7 @@ pub struct AppConfig {
     pub model_path: String,
     /// llama-server 포트
     pub port: u16,
-    /// 사용할 디바이스 (iGPU = Vulkan0)
+    /// 추론 디바이스 (Windows iGPU = "Vulkan0", macOS Metal·Linux = "" → 자동 선택)
     pub device: String,
     /// GPU 오프로드 레이어 수
     pub n_gpu_layers: i32,
@@ -41,7 +41,7 @@ impl Default for AppConfig {
             server_exe: default_server_exe(),
             model_path: default_model_path(),
             port: 8736,
-            device: "Vulkan0".into(),
+            device: default_device(),
             n_gpu_layers: 99,
             // iGPU 공유메모리 여유가 크고(~18GB) 2B 모델 KV 캐시가 작아 16K 가 안전
             ctx_size: 16384,
@@ -74,6 +74,10 @@ fn default_removebg_model() -> String {
         .into_owned()
 }
 
+/// llama-server 실행 파일 기본 경로. OS별로 분기한다.
+/// Windows = Downloads의 Vulkan 빌드(.exe), macOS = Homebrew Metal 빌드,
+/// 그 외(Linux 등) = PATH 상의 llama-server.
+#[cfg(target_os = "windows")]
 fn default_server_exe() -> String {
     let home = dirs::home_dir().unwrap_or_default();
     home.join("Downloads")
@@ -81,6 +85,30 @@ fn default_server_exe() -> String {
         .join("llama-server.exe")
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn default_server_exe() -> String {
+    // Homebrew(llama.cpp 포뮬러)가 Apple Silicon에 설치하는 표준 경로.
+    // 직접 빌드한 경우 등 다르면 config.json 의 server_exe 로 덮어쓴다.
+    "/opt/homebrew/bin/llama-server".to_string()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn default_server_exe() -> String {
+    "llama-server".to_string()
+}
+
+/// 추론 디바이스 기본값. Windows=Vulkan0(iGPU 명시), 그 외=빈 값.
+/// macOS Metal·Linux는 디바이스를 지정하지 않고 자동 선택(-ngl 로 오프로드)이 정석.
+#[cfg(target_os = "windows")]
+fn default_device() -> String {
+    "Vulkan0".into()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_device() -> String {
+    String::new()
 }
 
 fn default_model_path() -> String {
