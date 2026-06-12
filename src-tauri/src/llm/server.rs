@@ -64,6 +64,9 @@ impl LlamaServer {
         if let Some(mmproj) = resolve_mmproj(&cfg.model_path, &cfg.mmproj_path) {
             let mmproj_str = mmproj.to_string_lossy().into_owned();
             cmd.args(["--mmproj", &mmproj_str]);
+            // Qwen-VL 계열은 grounding 정확도를 위해 이미지당 최소 1024 토큰을 권장한다
+            // (llama-server load_hparams 경고 근거). vision 일 때만 부착.
+            cmd.args(["--image-min-tokens", "1024"]);
         }
         // 디바이스가 지정된 경우에만 --device 부착.
         // Windows=Vulkan0 명시, macOS Metal·Linux=빈 값 → 인자 생략 후 자동 선택(-ngl 오프로드).
