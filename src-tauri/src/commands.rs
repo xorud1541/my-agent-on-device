@@ -25,20 +25,26 @@ pub struct CaptureResult {
     pub height: u32,
 }
 
-/// 오버레이가 돌려주는 선택 영역. 좌표/크기는 오버레이 뷰포트(논리 px) 기준이며,
-/// view_w/view_h(= 오버레이 innerWidth/innerHeight)로 물리 픽셀 비율을 환산한다.
+/// 전체 캡처 결과. data_url 은 앱 안의 영역 선택 모달이 표시할 전체 스크린샷이다.
+#[derive(Debug, Serialize)]
+pub struct FullCapture {
+    pub path: String,
+    pub data_url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 크롭 영역. 좌표/크기는 캡처 원본의 픽셀 단위(프론트가 렌더된 이미지 박스로 환산해 보냄).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RegionRect {
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
-    pub view_w: f64,
-    pub view_h: f64,
 }
 
-/// 주 모니터 전체를 캡처해 캐시에 저장하고, (경로, 전체 base64 data URL, 물리 폭/높이) 반환.
-fn capture_full_to_cache(cache_dir: std::path::PathBuf) -> Result<(String, String, u32, u32), String> {
+/// 주 모니터 전체를 캡처해 캐시에 저장하고, 경로/전체 data URL/크기를 돌려준다.
+fn capture_full_to_cache(cache_dir: std::path::PathBuf) -> Result<FullCapture, String> {
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("캐시 폴더 생성 실패: {e}"))?;
     let monitors = xcap::Monitor::all().map_err(|e| format!("모니터 조회 실패: {e}"))?;
     // index 0 = 주 모니터 (기존 screen_capture 도구와 동일 관례)
@@ -54,32 +60,25 @@ fn capture_full_to_cache(cache_dir: std::path::PathBuf) -> Result<(String, Strin
 
     let bytes = std::fs::read(&path).map_err(|e| format!("캡처 읽기 실패: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok((
-        path.to_string_lossy().into_owned(),
-        format!("data:image/png;base64,{b64}"),
+    Ok(FullCapture {
+        path: path.to_string_lossy().into_owned(),
+        data_url: format!("data:image/png;base64,{b64}"),
         width,
         height,
-    ))
+    })
 }
 
-/// 전체 캡처 이미지를 선택 영역으로 잘라 캐시에 저장하고, 썸네일과 함께 돌려준다.
-fn crop_to_cache(
-    full_path: String,
-    phys_w: u32,
-    phys_h: u32,
-    rect: RegionRect,
-) -> Result<CaptureResult, String> {
-    let full = image::open(&full_path).map_err(|e| format!("캡처 로드 실패: {e}"))?;
-    // 오버레이 뷰포트(논리 px) → 물리 픽셀 환산
-    let sx = phys_w as f64 / rect.view_w.max(1.0);
-    let sy = phys_h as f64 / rect.view_h.max(1.0);
-    let x = (rect.x * sx).round().clamp(0.0, (phys_w.saturating_sub(1)) as f64) as u32;
-    let y = (rect.y * sy).round().clamp(0.0, (phys_h.saturating_sub(1)) as f64) as u32;
-    let w = (rect.w * sx).round().clamp(1.0, (phys_w - x) as f64) as u32;
-    let h = (rect.h * sy).round().clamp(1.0, (phys_h - y) as f64) as u32;
+/// 전체 캡처 이미지를 선택 영역(원본 픽셀)으로 잘라 캐시에 저장하고, 썸네일과 함께 돌려준다.
+fn crop_to_cache(full_path: &str, rect: RegionRect) -> Result<CaptureResult, String> {
+    let full = image::open(full_path).map_err(|e| format!("캡처 로드 실패: {e}"))?;
+    let (pw, ph) = (full.width(), full.height());
+    let x = (rect.x.round()).clamp(0.0, pw.saturating_sub(1) as f64) as u32;
+    let y = (rect.y.round()).clamp(0.0, ph.saturating_sub(1) as f64) as u32;
+    let w = (rect.w.round()).clamp(1.0, (pw - x) as f64) as u32;
+    let h = (rect.h.round()).clamp(1.0, (ph - y) as f64) as u32;
     let cropped = full.crop_imm(x, y, w, h);
 
-    let path = std::path::Path::new(&full_path).with_file_name(format!(
+    let path = std::path::Path::new(full_path).with_file_name(format!(
         "capture_{}.png",
         chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
     ));
@@ -100,34 +99,11 @@ fn crop_to_cache(
     })
 }
 
-/// 오버레이가 표시할 전체 스크린샷(base64 data URL)을 가져온다.
+/// UI 주도 스크린샷: 앱 숨김 → 주 모니터 전체 캡처 → 앱 복귀.
+/// 영역 선택은 프론트의 앱 내 모달에서 처리하고, 선택 결과로 crop_capture 를 호출한다.
+/// (두 번째 webview 창을 만들면 macOS WebKit 레이어트리 커밋에서 크래시 — 단일 창 유지가 핵심)
 #[tauri::command]
-pub fn region_get_image(state: State<'_, AppState>) -> Option<String> {
-    state.region_image.lock().unwrap().clone()
-}
-
-/// 오버레이에서 영역 선택 완료 — capture_screenshot 의 대기를 깨운다.
-#[tauri::command]
-pub fn region_finish(state: State<'_, AppState>, rect: RegionRect) {
-    if let Some(tx) = state.region_tx.lock().unwrap().take() {
-        let _ = tx.send(Some(rect));
-    }
-}
-
-/// 오버레이에서 취소(Esc/닫기) — capture_screenshot 이 None 을 받게 한다.
-#[tauri::command]
-pub fn region_cancel(state: State<'_, AppState>) {
-    if let Some(tx) = state.region_tx.lock().unwrap().take() {
-        let _ = tx.send(None);
-    }
-}
-
-/// UI 주도 스크린샷: 앱 숨김 → 전체 캡처 → 전체 화면 오버레이에서 영역 드래그 →
-/// 선택 영역만 크롭. 취소하면 Ok(None). 실패/취소와 무관하게 창은 반드시 복구된다.
-#[tauri::command]
-pub async fn capture_screenshot(app: AppHandle) -> Result<Option<CaptureResult>, String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
+pub async fn capture_screenshot(app: AppHandle) -> Result<FullCapture, String> {
     let cache_dir = app
         .path()
         .app_cache_dir()
@@ -141,69 +117,24 @@ pub async fn capture_screenshot(app: AppHandle) -> Result<Option<CaptureResult>,
     // 창이 화면 프레임에서 빠지도록 짧게 대기
     tokio::time::sleep(std::time::Duration::from_millis(180)).await;
 
-    let cap = tauri::async_runtime::spawn_blocking(move || capture_full_to_cache(cache_dir))
+    let result = tauri::async_runtime::spawn_blocking(move || capture_full_to_cache(cache_dir))
         .await
         .map_err(|e| format!("캡처 태스크 실패: {e}"))?;
-    let (full_path, data_url, phys_w, phys_h) = match cap {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(w) = &main {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
-            return Err(e);
-        }
-    };
 
-    // 오버레이가 가져갈 전체 이미지 + 선택 결과를 받을 채널 준비
-    let (tx, rx) = tokio::sync::oneshot::channel::<Option<RegionRect>>();
-    {
-        let state = app.state::<AppState>();
-        *state.region_image.lock().unwrap() = Some(data_url);
-        *state.region_tx.lock().unwrap() = Some(tx);
-    }
-
-    // 전체 화면 오버레이 창 (불투명 — 캡처 이미지를 꽉 채워 얼어붙은 화면처럼 보임)
-    let overlay = WebviewWindowBuilder::new(
-        &app,
-        "region-overlay",
-        WebviewUrl::App("index.html?overlay=1".into()),
-    )
-    .title("영역 선택")
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .fullscreen(true)
-    .build()
-    .map_err(|e| format!("오버레이 생성 실패: {e}"))?;
-
-    // 선택 또는 취소 대기 (최대 120초)
-    let rect = match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
-        Ok(Ok(r)) => r,
-        _ => None, // 타임아웃 또는 채널 드롭 → 취소 취급
-    };
-
-    let _ = overlay.close();
-    {
-        let state = app.state::<AppState>();
-        *state.region_image.lock().unwrap() = None;
-        state.region_tx.lock().unwrap().take();
-    }
+    // 성공/실패와 무관하게 창 복구
     if let Some(w) = &main {
         let _ = w.show();
         let _ = w.set_focus();
     }
+    result
+}
 
-    let Some(rect) = rect else {
-        return Ok(None); // 취소
-    };
-
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        crop_to_cache(full_path, phys_w, phys_h, rect)
-    })
-    .await
-    .map_err(|e| format!("크롭 태스크 실패: {e}"))?;
-    result.map(Some)
+/// 캡처 원본을 선택 영역으로 잘라 첨부용 결과를 돌려준다 (앱 내 모달에서 호출).
+#[tauri::command]
+pub async fn crop_capture(full_path: String, rect: RegionRect) -> Result<CaptureResult, String> {
+    tauri::async_runtime::spawn_blocking(move || crop_to_cache(&full_path, rect))
+        .await
+        .map_err(|e| format!("크롭 태스크 실패: {e}"))?
 }
 
 fn emit_event(app: &AppHandle, ev: AgentEvent) {

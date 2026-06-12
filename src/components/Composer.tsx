@@ -1,9 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { FormEvent, KeyboardEvent, useRef, useState } from "react";
+import { RegionOverlay } from "./RegionOverlay";
 
 interface Attachment {
   path: string;
   thumb: string;
+}
+
+interface FullCapture {
+  path: string;
+  data_url: string;
+  width: number;
+  height: number;
 }
 
 interface Props {
@@ -18,6 +26,7 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [pending, setPending] = useState<FullCapture | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !busy && !disabled;
@@ -43,8 +52,9 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
     setCaptureError(null);
     setCapturing(true);
     try {
-      const r = await invoke<{ path: string; thumb_data_url: string } | null>("capture_screenshot");
-      if (r) setAttachments((a) => [...a, { path: r.path, thumb: r.thumb_data_url }]);
+      // 앱 숨김 → 전체 캡처 → 복귀. 영역 선택은 앱 내 모달에서 이어진다.
+      const full = await invoke<FullCapture>("capture_screenshot");
+      setPending(full);
     } catch (err) {
       setCaptureError(String(err));
     } finally {
@@ -56,6 +66,17 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
 
   return (
     <div className="composer-wrap">
+      {pending && (
+        <RegionOverlay
+          src={pending.data_url}
+          fullPath={pending.path}
+          onDone={(att) => {
+            setAttachments((a) => [...a, att]);
+            setPending(null);
+          }}
+          onCancel={() => setPending(null)}
+        />
+      )}
       {captureError && <div className="capture-error">캡처 실패: {captureError}</div>}
       {attachments.length > 0 && (
         <div className="composer-attachments">

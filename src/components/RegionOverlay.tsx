@@ -6,29 +6,40 @@ interface Pt {
   y: number;
 }
 
+interface Props {
+  /** 전체 캡처 스크린샷 data URL */
+  src: string;
+  /** 캡처 원본의 캐시 경로 (crop_capture 입력) */
+  fullPath: string;
+  onDone: (att: { path: string; thumb: string }) => void;
+  onCancel: () => void;
+}
+
 /**
- * 영역 선택 오버레이. 전체 화면을 채운 캡처 이미지 위에서 사각형을 드래그하면
- * 그 영역(뷰포트 논리 px)을 백엔드로 보내 크롭하게 한다. Esc/우클릭은 취소.
+ * 앱 내 전체화면 모달에서 캡처 스크린샷 위에 사각형을 드래그해 영역을 선택한다.
+ * 별도 창을 만들지 않아(단일 webview) macOS WebKit 크래시를 피한다.
+ * 선택 좌표는 렌더된 <img> 박스를 기준으로 원본 픽셀로 환산해 백엔드에 보낸다.
  */
-export function RegionOverlay() {
-  const [img, setImg] = useState<string | null>(null);
+export function RegionOverlay({ src, fullPath, onDone, onCancel }: Props) {
   const [start, setStart] = useState<Pt | null>(null);
   const [cur, setCur] = useState<Pt | null>(null);
+  const [busy, setBusy] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
   const doneRef = useRef(false);
 
   useEffect(() => {
-    invoke<string | null>("region_get_image").then(setImg).catch(() => setImg(null));
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") cancel();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const cancel = () => {
     if (doneRef.current) return;
     doneRef.current = true;
-    invoke("region_cancel").catch(() => {});
+    onCancel();
   };
 
   const rect =
@@ -42,6 +53,7 @@ export function RegionOverlay() {
       : null;
 
   const onMouseDown = (e: React.MouseEvent) => {
+    if (busy) return;
     if (e.button !== 0) {
       cancel();
       return;
@@ -54,25 +66,37 @@ export function RegionOverlay() {
     if (start) setCur({ x: e.clientX, y: e.clientY });
   };
 
-  const onMouseUp = () => {
-    if (!rect || doneRef.current) return;
+  const onMouseUp = async () => {
+    if (!rect || busy || doneRef.current) return;
     if (rect.w < 5 || rect.h < 5) {
-      // 너무 작은 선택은 무시하고 다시 그리게 한다
       setStart(null);
       setCur(null);
       return;
     }
+    const img = imgRef.current;
+    if (!img) return;
+    const box = img.getBoundingClientRect();
+    // 렌더된 이미지 박스 기준 좌표 → 원본 픽셀로 환산
+    const scaleX = img.naturalWidth / box.width;
+    const scaleY = img.naturalHeight / box.height;
+    const px = {
+      x: (rect.x - box.left) * scaleX,
+      y: (rect.y - box.top) * scaleY,
+      w: rect.w * scaleX,
+      h: rect.h * scaleY,
+    };
+    setBusy(true);
     doneRef.current = true;
-    invoke("region_finish", {
-      rect: {
-        x: rect.x,
-        y: rect.y,
-        w: rect.w,
-        h: rect.h,
-        view_w: window.innerWidth,
-        view_h: window.innerHeight,
-      },
-    }).catch(() => {});
+    try {
+      const r = await invoke<{ path: string; thumb_data_url: string }>("crop_capture", {
+        fullPath,
+        rect: px,
+      });
+      onDone({ path: r.path, thumb: r.thumb_data_url });
+    } catch {
+      // 실패 시 모달만 닫는다
+      onCancel();
+    }
   };
 
   return (
@@ -81,9 +105,12 @@ export function RegionOverlay() {
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
-      onContextMenu={(e) => e.preventDefault()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        cancel();
+      }}
     >
-      {img && <img className="region-img" src={img} alt="" draggable={false} />}
+      <img ref={imgRef} className="region-img" src={src} alt="" draggable={false} />
       {!rect && <div className="region-dim-full" />}
       {rect && (
         <div
@@ -91,7 +118,9 @@ export function RegionOverlay() {
           style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
         />
       )}
-      <div className="region-hint">드래그해서 영역을 선택하세요 · Esc 취소</div>
+      <div className="region-hint">
+        {busy ? "잘라내는 중…" : "드래그해서 영역을 선택하세요 · Esc/우클릭 취소"}
+      </div>
     </div>
   );
 }

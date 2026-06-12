@@ -689,21 +689,26 @@ body::before {
   border-radius: 8px;
 }
 
-/* ── 영역 선택 오버레이 ─────────────────────────────────── */
+/* ── 영역 선택 오버레이 (앱 내 모달) ────────────────────── */
 .region-overlay {
   position: fixed;
   inset: 0;
+  z-index: 1000;
   overflow: hidden;
   cursor: crosshair;
   user-select: none;
+  background: #000;
+  display: grid;
+  place-items: center;
 }
 .region-img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
+  max-width: 100vw;
+  max-height: 100vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
   -webkit-user-drag: none;
+  display: block;
 }
 /* 선택 전: 화면 전체를 살짝 어둡게 */
 .region-dim-full {
