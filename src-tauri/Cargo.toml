@@ -35,6 +35,7 @@ encoding_rs = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
 
 # ort onnxruntime 적재 — alian 과 동일하게 Windows 는 load-dynamic (MSVC LNK2038 회피).
 # onnxruntime.dll 은 vendor/onnxruntime/ 정본을 ORT_DYLIB_PATH 로 지정해 로드한다.

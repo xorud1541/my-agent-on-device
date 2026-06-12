@@ -1,7 +1,32 @@
 use crate::config::AppConfig;
 use anyhow::{bail, Context, Result};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::{Child, Command};
+
+/// 사용할 mmproj 경로를 결정한다. 설정값이 있으면 그것을(존재할 때만),
+/// 없으면 모델 파일과 같은 폴더의 `mmproj-*.gguf` 를 자동 페어링한다.
+pub fn resolve_mmproj(model_path: &str, configured: &str) -> Option<PathBuf> {
+    if !configured.trim().is_empty() {
+        let p = PathBuf::from(configured);
+        return p.exists().then_some(p);
+    }
+    let dir = Path::new(model_path).parent()?;
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| {
+                        let n = n.to_lowercase();
+                        n.starts_with("mmproj") && n.ends_with(".gguf")
+                    })
+                    .unwrap_or(false)
+        })
+}
 
 /// llama-server 사이드카 프로세스 관리자.
 pub struct LlamaServer {
@@ -35,6 +60,11 @@ impl LlamaServer {
             "--jinja",
             "--no-webui",
         ]);
+        // 멀티모달(vision) 프로젝터: 설정값 또는 모델과 같은 폴더의 mmproj-*.gguf 자동 페어링
+        if let Some(mmproj) = resolve_mmproj(&cfg.model_path, &cfg.mmproj_path) {
+            let mmproj_str = mmproj.to_string_lossy().into_owned();
+            cmd.args(["--mmproj", &mmproj_str]);
+        }
         // 디바이스가 지정된 경우에만 --device 부착.
         // Windows=Vulkan0 명시, macOS Metal·Linux=빈 값 → 인자 생략 후 자동 선택(-ngl 오프로드).
         // (빈 값으로 `--device ""` 를 넘기면 llama-server 가 즉시 죽는다)
@@ -111,5 +141,43 @@ impl LlamaServer {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_mmproj_auto_pairs_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model-Q4.gguf"), "m").unwrap();
+        std::fs::write(dir.path().join("mmproj-model-BF16.gguf"), "p").unwrap();
+        let model = dir.path().join("model-Q4.gguf").to_string_lossy().into_owned();
+        let got = resolve_mmproj(&model, "").unwrap();
+        assert!(got
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_lowercase()
+            .starts_with("mmproj"));
+    }
+
+    #[test]
+    fn resolve_mmproj_prefers_configured_when_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("custom-mmproj.gguf");
+        std::fs::write(&cfg_path, "p").unwrap();
+        std::fs::write(dir.path().join("mmproj-auto.gguf"), "p").unwrap();
+        let got = resolve_mmproj("/any/model.gguf", &cfg_path.to_string_lossy()).unwrap();
+        assert_eq!(got, cfg_path);
+    }
+
+    #[test]
+    fn resolve_mmproj_none_when_no_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model-Q4.gguf"), "m").unwrap();
+        let model = dir.path().join("model-Q4.gguf").to_string_lossy().into_owned();
+        assert!(resolve_mmproj(&model, "").is_none());
     }
 }

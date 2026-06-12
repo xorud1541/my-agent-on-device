@@ -33,6 +33,9 @@ pub struct AppConfig {
     pub agent_name: String,
     /// 배경제거 ONNX 모델 경로
     pub removebg_model: String,
+    /// 멀티모달 vision 프로젝터(mmproj) 경로. 빈 값이면 모델과 같은 폴더의
+    /// `mmproj-*.gguf` 를 자동 페어링한다.
+    pub mmproj_path: String,
 }
 
 impl Default for AppConfig {
@@ -54,6 +57,7 @@ impl Default for AppConfig {
             user_name: String::new(),
             agent_name: String::new(),
             removebg_model: default_removebg_model(),
+            mmproj_path: String::new(),
         }
     }
 }
