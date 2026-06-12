@@ -131,9 +131,26 @@ struct ImageUrl { url: String }
 
 ## 8. 범위 밖 (YAGNI)
 
-- 영역 드래그 선택
+- ~~영역 드래그 선택~~ → **범위 내로 변경됨 (아래 Addendum 참고)**
 - 임의 파일 첨부(파일 피커), 이미지 외 첨부
 - 멀티모니터 선택(이번엔 주 모니터 고정)
+
+## Addendum (2026-06-12): 전체화면 → 영역 드래그 선택
+
+사용자 요청으로 캡처 방식을 전체화면에서 **영역 드래그 선택**으로 변경. Windows·macOS 동일
+동작이 필수라, OS별 네이티브 도구 대신 **오버레이 + 크롭 단일 코드패스**를 채택.
+
+흐름: 앱 숨김 → `xcap` 으로 주 모니터 전체 캡처(캐시 저장) → **불투명 전체화면 오버레이 창**
+(`region-overlay`)이 그 스크린샷을 꽉 채워 표시(얼어붙은 화면처럼 보임) → 사용자가 사각형 드래그
+→ 선택 영역(뷰포트 논리 px)을 `region_finish` 로 전달 → 백엔드가 물리 픽셀로 환산해 크롭 →
+크롭 결과만 캐시에 저장하고 첨부. Esc/우클릭/창닫기는 `region_cancel`(또는 120초 타임아웃)으로
+취소 → `capture_screenshot` 이 `Ok(None)` 반환, 첨부 없음.
+
+- 투명창 미사용(스크린샷이 불투명하게 화면을 덮음) → macOS `macOSPrivateApi` 불필요, 양 OS 동일.
+- DPI 보정: 크롭 시 `물리폭/뷰포트폭`, `물리높이/뷰포트높이` 비율로 x/y 독립 스케일.
+- 동기화: `oneshot` 채널을 AppState(`region_tx`)에 저장, 오버레이의 finish/cancel 이 깨운다.
+- 오버레이 창은 같은 번들을 `index.html?overlay=1` 로 로드, `main.tsx` 가 `RegionOverlay` 렌더.
+  `region-overlay` 라벨을 capability `windows` 에 추가.
 
 ## 핵심 리스크
 
