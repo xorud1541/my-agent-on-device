@@ -4,6 +4,7 @@ use crate::llm::client::HttpLlmClient;
 use crate::models::{AgentEvent, ChatMessage};
 use crate::sessions::{SessionMeta, SessionStore};
 use crate::AppState;
+use base64::Engine as _;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,6 +15,76 @@ pub struct ModelEntry {
     pub name: String,
     pub path: String,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaptureResult {
+    pub path: String,
+    pub thumb_data_url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 주 모니터를 캡처해 앱 캐시에 저장하고, 320px 썸네일(base64)과 경로를 돌려준다.
+fn capture_primary_to_cache(cache_dir: std::path::PathBuf) -> Result<CaptureResult, String> {
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("캐시 폴더 생성 실패: {e}"))?;
+    let monitors = xcap::Monitor::all().map_err(|e| format!("모니터 조회 실패: {e}"))?;
+    // index 0 = 주 모니터 (기존 screen_capture 도구와 동일 관례)
+    let monitor = monitors.into_iter().next().ok_or("사용 가능한 모니터가 없습니다")?;
+    let image = monitor.capture_image().map_err(|e| format!("화면 캡처 실패: {e}"))?;
+    let (width, height) = (image.width(), image.height());
+
+    let path = cache_dir.join(format!(
+        "capture_{}.png",
+        chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
+    ));
+    image.save(&path).map_err(|e| format!("캡처 저장 실패: {e}"))?;
+
+    // 썸네일: 저장된 파일을 image 0.25 로 다시 열어 다운스케일(xcap/image 버전 불일치 회피)
+    let thumb = image::open(&path)
+        .map_err(|e| format!("썸네일 로드 실패: {e}"))?
+        .thumbnail(320, 320);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    thumb
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("썸네일 인코딩 실패: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
+
+    Ok(CaptureResult {
+        path: path.to_string_lossy().into_owned(),
+        thumb_data_url: format!("data:image/png;base64,{b64}"),
+        width,
+        height,
+    })
+}
+
+/// UI 주도 스크린샷: 앱 창을 숨기고 → 캡처 → 다시 보여준다.
+/// 캡처가 실패해도 창은 반드시 복구된다.
+#[tauri::command]
+pub async fn capture_screenshot(app: AppHandle) -> Result<CaptureResult, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("앱 캐시 경로 조회 실패: {e}"))?
+        .join("captures");
+
+    let window = app.get_webview_window("main");
+    if let Some(w) = &window {
+        let _ = w.hide();
+    }
+    // 창이 화면 프레임에서 빠지도록 짧게 대기
+    tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+
+    let result = tauri::async_runtime::spawn_blocking(move || capture_primary_to_cache(cache_dir))
+        .await
+        .map_err(|e| format!("캡처 태스크 실패: {e}"))?;
+
+    // 성공/실패와 무관하게 창 복구
+    if let Some(w) = &window {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    result
 }
 
 fn emit_event(app: &AppHandle, ev: AgentEvent) {
@@ -36,7 +107,8 @@ pub async fn set_config(app: AppHandle, new_config: AppConfig) -> Result<(), Str
             || cfg.device != new_config.device
             || cfg.n_gpu_layers != new_config.n_gpu_layers
             || cfg.ctx_size != new_config.ctx_size
-            || cfg.reasoning_budget != new_config.reasoning_budget;
+            || cfg.reasoning_budget != new_config.reasoning_budget
+            || cfg.mmproj_path != new_config.mmproj_path;
         *cfg = new_config.clone();
         cfg.save().map_err(|e| e.to_string())?;
         changed
@@ -169,7 +241,12 @@ pub fn cancel_turn(state: State<'_, AppState>, session_id: String) {
 
 /// 사용자 발화 처리. 백그라운드 태스크로 에이전트 루프를 돌리고 즉시 반환한다.
 #[tauri::command]
-pub async fn send_message(app: AppHandle, session_id: String, text: String) -> Result<(), String> {
+pub async fn send_message(
+    app: AppHandle,
+    session_id: String,
+    text: String,
+    attachments: Vec<String>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
 
     let mut messages = {
@@ -183,7 +260,11 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
         let history = sessions
             .get_mut(&session_id)
             .ok_or_else(|| format!("세션 없음: {session_id}"))?;
-        history.push(ChatMessage::user(text));
+        history.push(if attachments.is_empty() {
+            ChatMessage::user(text)
+        } else {
+            ChatMessage::user_with_images(text, attachments.clone())
+        });
         history.clone()
     };
     {
@@ -202,16 +283,17 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
     if base_url.is_empty() {
         return Err("LLM 서버가 아직 준비되지 않음".into());
     }
-    let (max_rounds, temperature, max_output_tokens) = {
+    let (max_rounds, temperature, max_output_tokens, vision_enabled) = {
         let cfg = state.config.lock().unwrap();
-        (cfg.max_tool_rounds, cfg.temperature, cfg.max_output_tokens)
+        let vision = crate::llm::server::resolve_mmproj(&cfg.model_path, &cfg.mmproj_path).is_some();
+        (cfg.max_tool_rounds, cfg.temperature, cfg.max_output_tokens, vision)
     };
     let registry = state.registry.clone();
 
     let app2 = app.clone();
     let sid = session_id.clone();
     tauri::async_runtime::spawn(async move {
-        let client = HttpLlmClient::new(base_url, max_output_tokens);
+        let client = HttpLlmClient::new(base_url, max_output_tokens, vision_enabled);
         let app3 = app2.clone();
         // 턴 내에서 발생한 Error 이벤트도 대화 로그에 남도록 수집
         let turn_errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
