@@ -109,6 +109,11 @@ pub fn tools_to_exclude(user_text: &str) -> Vec<&'static str> {
         if is_extract_intent(user_text) {
             // zip_create 대체 행동 차단 (2026-06-12 실로그: 풀 zip 이 없자 새 zip 을 만들어버림)
             v.push("zip_create");
+        } else if is_delete_intent(user_text) {
+            // 삭제 의도에서 '압축' 토큰에 끌려 zip_extract 로 새는 경로 차단
+            // (2026-06-12 실로그: "압축파일 모두 지워봐" → 폴더를 zip_extract).
+            // zip_create 는 "압축해서 원본 지워줘" 복합을 위해 남겨둔다.
+            v.push("zip_extract");
         }
         v
     };
@@ -125,6 +130,12 @@ pub fn tools_to_exclude(user_text: &str) -> Vec<&'static str> {
 /// "압축 풀어/해제" 류의 압축 해제 의도인가?
 fn is_extract_intent(user_text: &str) -> bool {
     user_text.contains("압축") && (user_text.contains("풀") || user_text.contains("해제"))
+}
+
+/// "지워/삭제" 류의 삭제 의도인가?
+fn is_delete_intent(user_text: &str) -> bool {
+    const DELETE_VERBS: &[&str] = &["지워", "지우", "삭제"];
+    DELETE_VERBS.iter().any(|v| user_text.contains(v))
 }
 
 /// "이름을 X로 바꿔/변경" 류의 파일 이름변경 의도인가?
@@ -1423,6 +1434,18 @@ mod tests {
         assert!(tools_to_exclude("백업.zip 압축 해제해줘").contains(&"zip_create"));
         // 압축 생성 의도는 제외하지 않는다
         assert!(!tools_to_exclude("이미지들 압축해줘").contains(&"zip_create"));
+    }
+
+    /// 삭제 의도에선 zip_extract 를 숨긴다 (2026-06-12 실로그: "압축파일 모두 지워봐"에
+    /// 모델이 '압축' 토큰에 끌려 폴더를 zip_extract — delete_path 시도조차 안 함)
+    #[test]
+    fn delete_intent_excludes_zip_extract() {
+        assert!(tools_to_exclude("현재 워크스페이스에 있는 압축파일 모두 지워봐").contains(&"zip_extract"));
+        assert!(tools_to_exclude("cat_nobg.zip 삭제해줘").contains(&"zip_extract"));
+        // 풀기 의도가 함께 있으면 풀기가 본업 — 숨기면 안 된다
+        assert!(!tools_to_exclude("압축 풀고 원본 압축파일은 지워줘").contains(&"zip_extract"));
+        // 압축 생성 복합("압축해서 원본 지워줘")을 위해 zip_create 는 건드리지 않는다
+        assert!(!tools_to_exclude("이미지들 압축해서 원본은 지워줘").contains(&"zip_create"));
     }
 
     /// set_workspace 는 사용자가 워크스페이스를 직접 언급한 턴에만 노출한다.
