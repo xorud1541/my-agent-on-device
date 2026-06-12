@@ -155,6 +155,22 @@ pub(crate) fn opt_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(Value::as_bool)
 }
 
+/// "파일 없음" 오류 메시지를 만든다. 주변에서 같은/비슷한 이름을 찾으면 그 경로로
+/// 재시도하라는 힌트를, 못 찾으면 "경로를 추측하지 말고 사용자에게 위치를 물어보라"는
+/// 지시를 담는다. 2B 는 시스템 프롬프트 규칙(13)보다 직전 도구 결과의 지시를 더 잘
+/// 따른다 — 실패 인지→재계획/질문 흐름을 에러 텍스트가 직접 이끈다 (2026-06-12).
+pub(crate) fn not_found_msg(requested: &str, ws: &std::path::Path) -> String {
+    let hint = not_found_hint(requested, ws);
+    if hint.is_empty() {
+        format!(
+            "파일 없음: {requested}. 주변 폴더에서도 같은 이름을 찾지 못했습니다. \
+             다른 경로를 추측해 재시도하지 말고, 사용자에게 파일의 정확한 위치(폴더)를 물어보세요."
+        )
+    } else {
+        format!("파일 없음: {requested}.{hint}")
+    }
+}
+
 /// 요청 경로에 파일이 없을 때 워크스페이스 일대(부모 1단계 + 하위 깊이 2)에서 같은/비슷한
 /// 이름을 찾아 힌트 문장을 만든다. 2B 에게 "파일 없음"은 막다른 골목이라, 에러가
 /// 올바른 경로를 직접 알려줘야 다음 라운드에서 복구한다
@@ -237,6 +253,28 @@ pub(crate) fn not_found_hint(requested: &str, ws: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 주변에서 못 찾은 "파일 없음"은 막다른 골목이 아니라 사용자 질문으로 이어져야 한다.
+    /// 2B 는 프롬프트 규칙보다 직전 도구 결과의 지시를 더 잘 따른다 (2026-06-12).
+    #[test]
+    fn not_found_msg_instructs_asking_user_when_no_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg = not_found_msg(&dir.path().join("유니콘.pdf").to_string_lossy(), dir.path());
+        assert!(msg.contains("물어보세요"), "{msg}");
+        assert!(msg.contains("추측"), "재시도 배회 금지 지시 없음: {msg}");
+    }
+
+    /// 주변에 같은 이름이 있으면 질문 대신 그 경로로 재시도를 지시한다
+    #[test]
+    fn not_found_msg_prefers_location_hint_over_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(dir.path().join("report.pdf"), "p").unwrap();
+        let msg = not_found_msg(&ws.join("report.pdf").to_string_lossy(), &ws);
+        assert!(msg.contains("다시 시도하세요"), "{msg}");
+        assert!(!msg.contains("물어보세요"), "{msg}");
+    }
 
     /// 오타 경로도 유사 일치로 힌트를 준다 (2026-06-12 실로그: 모델이 "pngs.zip"을
     /// "pngs.pngs.zip"으로 융합 — 정확 일치만으로는 2B 오타를 못 잡는다)

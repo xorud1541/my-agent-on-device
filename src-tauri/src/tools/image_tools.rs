@@ -27,10 +27,7 @@ impl Tool for ImageInfo {
         let path = req_str(args, "path")?;
         // 존재 확인을 먼저 — 위치 힌트가 os 에러 꼬리 없이 문장 끝에 오도록
         if !Path::new(path).exists() {
-            bail!(
-                "파일 없음: {path}.{}",
-                crate::tools::not_found_hint(path, &ctx.workspace())
-            );
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
         }
         let meta =
             std::fs::metadata(path).with_context(|| format!("파일 정보 조회 실패: {path}"))?;
@@ -73,6 +70,10 @@ impl Tool for ImageTransform {
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
+        // 존재 확인을 먼저 — 없는 파일이면 위치 힌트/질문 지시로 회복 경로를 준다
+        if !Path::new(path).exists() {
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
+        }
         // content-sniffing — 확장자와 내용이 다른 파일도 연다
         let mut img = super::image_ai::open_image_sniffed(Path::new(path))?;
         let (ow, oh) = (img.width(), img.height());

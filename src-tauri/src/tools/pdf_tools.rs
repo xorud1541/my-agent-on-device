@@ -1,6 +1,7 @@
 use super::{opt_u64, req_str, Tool, ToolCtx};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use std::path::Path;
 
 const DEFAULT_MAX_CHARS: u64 = 20_000;
 
@@ -23,14 +24,26 @@ impl Tool for PdfExtractText {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
+        // 존재 확인을 먼저 — 없는 파일이면 위치 힌트/질문 지시로 회복 경로를 준다
+        // (2026-06-12: PDF 발화에서 "추출 실패"가 막다른 골목이 되던 격차)
+        if !Path::new(path).exists() {
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
+        }
         let max_chars = opt_u64(args, "max_chars").unwrap_or(DEFAULT_MAX_CHARS) as usize;
         let text = pdf_extract::extract_text(path)
             .with_context(|| format!("PDF 텍스트 추출 실패: {path}"))?;
         let text = text.trim();
         if text.is_empty() {
-            return Ok("(텍스트 없음 — 스캔본이거나 이미지 기반 PDF일 수 있음)".into());
+            // 결과가 곧 지시가 되도록 쓴다 — 2B 는 빈 결과를 받아들이지 못하고 다른
+            // 도구로 배회하거나 내용을 지어낸다 (2026-06-12 R3 실측: read_file 로 원시
+            // PDF 바이트를 읽으러 감). 양성 지시만 사용 (부정문은 환각 재료가 된다).
+            return Ok(
+                "이 PDF는 글자가 없는 스캔본(이미지 기반)이라 텍스트 추출 결과가 \
+                       비어 있습니다. 이 사실을 그대로 사용자에게 알리고 마무리하세요."
+                    .into(),
+            );
         }
         let truncated: String = text.chars().take(max_chars).collect();
         if truncated.len() < text.len() {

@@ -37,7 +37,10 @@ impl Tool for ZipCreate {
         }
         for p in &paths {
             if !p.exists() {
-                bail!("경로 없음: {}", p.display());
+                bail!(crate::tools::not_found_msg(
+                    &p.to_string_lossy(),
+                    &ctx.workspace()
+                ));
             }
         }
 
@@ -142,10 +145,7 @@ impl Tool for ZipExtract {
         let path = req_str(args, "path")?;
         // 존재 확인을 먼저 — 힌트가 os 에러 꼬리 없이 문장 끝에 오도록 (2B 주의 분산 방지)
         if !Path::new(path).exists() {
-            bail!(
-                "파일 없음: {path}.{}",
-                crate::tools::not_found_hint(path, &ctx.workspace())
-            );
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
         }
         let file = File::open(path).with_context(|| format!("파일 열기 실패: {path}"))?;
         let mut archive = zip::ZipArchive::new(file).context("zip 형식 아님")?;

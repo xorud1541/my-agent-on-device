@@ -566,23 +566,45 @@ pub async fn run_turn(
                 m.role == "tool"
                     && m.content.as_deref().is_some_and(|c| c.contains("이 경로로 다시 시도하세요"))
             });
+        // "주변에서도 못 찾음 — 사용자에게 물어보라"(not_found_msg) 마커가 담긴 실패
+        // 라운드는 더 배회시키지 않고 즉시 마무리로 보낸다. 2B 는 에러 속 질문 지시를
+        // 무시하고 다른 도구로 샌다 (2026-06-12 R2 실측: list_dir 배회 → 빈 마무리 →
+        // 무의미한 중단 안내). 지시는 약하고 도구 노출 제어가 결정적이라는 동일 교훈.
+        let any_ask_user = messages
+            .iter()
+            .rev()
+            .take(result.tool_calls.len())
+            .any(|m| {
+                m.role == "tool"
+                    && m.content.as_deref().is_some_and(|c| c.contains("물어보세요"))
+            });
         if any_success {
             rejected_rounds = 0;
         } else if !any_hint {
             rejected_rounds += 1;
         }
-        if rejected_rounds >= MAX_REJECTED_ROUNDS && !cancel.load(Ordering::Relaxed) {
+        let must_finish = rejected_rounds >= MAX_REJECTED_ROUNDS
+            || (!any_success && !any_hint && any_ask_user);
+        if must_finish && !cancel.load(Ordering::Relaxed) {
             let no_tools = Value::Array(vec![]);
             let mut final_result = client.complete(messages, &no_tools, temperature, &mut sink).await?;
             // 도구를 떼고 물어도 2B 는 마크업을 텍스트로 뱉을 수 있다 (2026-06-12 적대 테스트)
             strip_tool_markup(&mut final_result.content);
-            if final_result.content.is_empty() {
+            if !final_result.content.is_empty() {
+                messages.push(ChatMessage::assistant(Some(final_result.content), None));
+            } else if let Some(q) = synthesize_location_question(messages) {
+                // 마무리 호출마저 비면 마지막 '파일 없음' 에러에서 결정적 질문을 합성한다 —
+                // 모델이 질문을 작문하지 못해도 사용자는 항상 다음 행동(위치 제공)을 안내받는다.
+                emit(AgentEvent::TextDelta {
+                    session_id: session_id.to_string(),
+                    delta: q.clone(),
+                });
+                messages.push(ChatMessage::assistant(Some(q), None));
+            } else {
                 emit(AgentEvent::Error {
                     session_id: session_id.to_string(),
                     message: "도구 실행이 진전 없이 반복되어 작업을 중단했습니다. 요청을 바꿔 다시 시도해보세요.".into(),
                 });
-            } else {
-                messages.push(ChatMessage::assistant(Some(final_result.content), None));
             }
             break;
         }
@@ -608,6 +630,46 @@ pub async fn run_turn(
         elapsed_ms: started.elapsed().as_millis() as u64,
     });
     Ok(())
+}
+
+/// 직근 도구 결과의 "파일 없음: <경로>. ... 물어보세요" 에러에서 파일명을 뽑아
+/// 사용자에게 위치를 묻는 문장을 만든다. 강제 마무리가 빈 완성으로 끝났을 때의
+/// 결정적 폴백 — 2B 가 질문을 작문하지 못해도 대화가 회복 가능한 상태로 끝난다.
+fn synthesize_location_question(messages: &[ChatMessage]) -> Option<String> {
+    let content = messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.content.as_deref())
+        .find(|c| c.contains("물어보세요"))?;
+    let name = content
+        .split("파일 없음:")
+        .nth(1)
+        .map(|rest| rest.trim_start())
+        .and_then(|rest| rest.split(". 주변").next())
+        .and_then(|path| std::path::Path::new(path.trim()).file_name())
+        .map(|n| n.to_string_lossy().into_owned());
+    // 모델이 인자 파일명을 환각하기도 한다 (2026-06-12 R2: '발표자료.pdf' →
+    // 'final_report.pdf' 로 영문화). 사용자가 실제로 말한 이름일 때만 질문에 쓴다.
+    let user_text = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_deref())
+        .unwrap_or("");
+    let user_said = |n: &str| {
+        let stem = std::path::Path::new(n)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| n.to_string());
+        user_text.contains(n) || user_text.contains(&stem)
+    };
+    Some(match name {
+        Some(n) if user_said(&n) => {
+            format!("'{n}' 파일을 찾지 못했어요. 어느 폴더에 있는지 알려주시면 다시 시도할게요.")
+        }
+        _ => "요청하신 파일을 찾지 못했어요. 정확한 위치(폴더)를 알려주시겠어요?".into(),
+    })
 }
 
 fn clip(s: &str, max_chars: usize) -> String {
@@ -838,12 +900,19 @@ mod tests {
         assert_eq!(messages.last().unwrap().content.as_deref(), Some("6개 폴더 확인 끝."));
     }
 
-    /// 도구가 연속 2라운드 전부 실패하면 한도까지 끌지 않고 그 시점에 마무리한다
+    /// 도구가 연속 2라운드 전부 실패하면 한도까지 끌지 않고 그 시점에 마무리한다.
+    /// (ask-user 마커가 없는 일반 실패 — 파일 경로에 list_dir — 로 검증한다.
+    ///  '파일 없음+물어보세요' 실패는 1라운드 만에 끝나는 별도 경로가 있다)
     #[tokio::test(flavor = "multi_thread")]
     async fn consecutive_failed_rounds_finish_early() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1").unwrap();
+        std::fs::write(&f2, "2").unwrap();
         let client = MockClient::ok(vec![
-            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는파일1.txt"})),
-            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는파일2.txt"})),
+            tool_call_result("list_dir", serde_json::json!({"path": f1.to_string_lossy()})),
+            tool_call_result("list_dir", serde_json::json!({"path": f2.to_string_lossy()})),
             // 강제 마무리(무도구) 응답
             CompletionResult { content: "파일을 찾지 못했습니다.".into(), ..Default::default() },
         ]);
@@ -897,10 +966,15 @@ mod tests {
     ///  모델이 멋대로 이어함 — 미완 흔적이 다음 턴을 오염)
     #[tokio::test(flavor = "multi_thread")]
     async fn aborted_turn_leaves_explicit_closure_message() {
-        // 전부 실패하는 호출 2라운드 → 강제 마무리도 빈 응답 → 에러로 중단
+        // 전부 실패하는 호출 2라운드(마커 없는 일반 실패) → 강제 마무리도 빈 응답 → 에러로 중단
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "1").unwrap();
+        std::fs::write(&f2, "2").unwrap();
         let client = MockClient::ok(vec![
-            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는1.txt"})),
-            tool_call_result("read_file", serde_json::json!({"path": "C:\\없는2.txt"})),
+            tool_call_result("list_dir", serde_json::json!({"path": f1.to_string_lossy()})),
+            tool_call_result("list_dir", serde_json::json!({"path": f2.to_string_lossy()})),
             CompletionResult::default(), // 강제 마무리 응답이 빈 완성
         ]);
         let registry = ToolRegistry::with_default_tools();
@@ -972,11 +1046,14 @@ mod tests {
         std::fs::write(&real, "내용").unwrap();
 
         let wrong = ws.join("data.txt").to_string_lossy().to_string();
-        let missing_dir = ws.join("없는폴더").to_string_lossy().to_string();
+        // r2 실패는 ask-user 마커가 없는 종류여야 한다 (파일 경로에 list_dir)
+        let dummy = ws.join("dummy.txt");
+        std::fs::write(&dummy, "d").unwrap();
+        let missing_dir = dummy.to_string_lossy().to_string();
         let client = MockClient::ok(vec![
             // r1: 파일 없음 + 위치 힌트 (read_file 의 not_found_hint 가 부모에서 발견)
             tool_call_result("read_file", serde_json::json!({"path": wrong})),
-            // r2: 힌트와 무관한 실패 (없는 디렉토리) — 기존 정책이면 여기서 조기중단
+            // r2: 힌트와 무관한 실패 (파일에 list_dir) — 기존 정책이면 여기서 조기중단
             tool_call_result("list_dir", serde_json::json!({"path": missing_dir})),
             // r3: 힌트의 경로로 재시도 — 이 라운드까지 살아 있어야 한다
             tool_call_result("read_file", serde_json::json!({"path": real.to_string_lossy()})),
@@ -998,6 +1075,122 @@ mod tests {
             Some("내용 확인 완료."),
             "힌트 라운드가 카운트되면 r3 전에 조기중단된다"
         );
+    }
+
+    /// "주변에서도 못 찾음 — 물어보세요" 에러(not_found_msg)가 나온 실패 라운드는
+    /// 라운드 예산을 더 태우지 않고 즉시 도구를 뗀 마무리로 보낸다.
+    /// (2026-06-12 R2 실측: 에러 속 질문 지시를 무시하고 list_dir 로 배회 → 빈 마무리)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ask_user_error_finishes_immediately_without_wandering() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("발표자료.pdf").to_string_lossy().to_string();
+        let client = MockClient::ok(vec![
+            tool_call_result("read_file", serde_json::json!({"path": missing})),
+            // 강제 마무리 응답 (이 호출이 도구 없이 나가야 한다)
+            CompletionResult { content: "발표자료.pdf 를 찾지 못했어요. 어디에 있나요?".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut cfg = AppConfig::default();
+        cfg.workspace_dir = dir.path().to_string_lossy().into_owned();
+        let ctx = ToolCtx::noop(cfg);
+        let mut messages = vec![ChatMessage::user("발표자료.pdf 요약해줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &ctx, &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        let counts = client.tool_counts.lock().unwrap().clone();
+        assert_eq!(counts.len(), 2, "물어보라 에러 후 즉시 마무리 (배회 라운드 없음)");
+        assert_eq!(counts[1], 0, "마무리 호출은 도구 없이");
+        assert!(messages.last().unwrap().content.as_deref().unwrap().contains("어디"));
+    }
+
+    /// 강제 마무리가 빈 완성이면 마지막 '파일 없음' 에러에서 위치 질문을 합성한다 —
+    /// 모델이 질문을 작문하지 못해도 사용자는 항상 다음 행동을 안내받는다.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_forced_finish_synthesizes_location_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("발표자료.pdf").to_string_lossy().to_string();
+        let client = MockClient::ok(vec![
+            tool_call_result("read_file", serde_json::json!({"path": missing})),
+            CompletionResult::default(), // 강제 마무리가 빈 완성
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut cfg = AppConfig::default();
+        cfg.workspace_dir = dir.path().to_string_lossy().into_owned();
+        let ctx = ToolCtx::noop(cfg);
+        let mut messages = vec![ChatMessage::user("발표자료.pdf 요약해줘")];
+        let events = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &ctx, &mut messages, "s1", 8, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
+
+        let answer = messages.last().unwrap().content.as_deref().unwrap();
+        assert!(answer.contains("발표자료.pdf"), "파일명이 질문에 있어야 함: {answer}");
+        assert!(answer.contains("알려주"), "위치 질문이어야 함: {answer}");
+        let evs = events.lock().unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(e, AgentEvent::TextDelta { .. })),
+            "합성 질문은 UI 에도 흘러야 함"
+        );
+        assert!(!evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })), "에러 대신 질문으로 종료");
+    }
+
+    /// 위치 힌트가 있는 실패는 ask-user 마커가 아니다 — 재시도 라운드를 보장한다
+    #[tokio::test(flavor = "multi_thread")]
+    async fn location_hint_failure_still_allows_retry_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(dir.path().join("data.txt"), "내용").unwrap();
+        let wrong = ws.join("data.txt").to_string_lossy().to_string();
+        let real = dir.path().join("data.txt").to_string_lossy().to_string();
+        let client = MockClient::ok(vec![
+            tool_call_result("read_file", serde_json::json!({"path": wrong})), // 힌트 실패
+            tool_call_result("read_file", serde_json::json!({"path": real})),  // 힌트로 회복
+            CompletionResult { content: "내용 확인.".into(), ..Default::default() },
+        ]);
+        let registry = ToolRegistry::with_default_tools();
+        let mut cfg = AppConfig::default();
+        cfg.workspace_dir = ws.to_string_lossy().into_owned();
+        let ctx = ToolCtx::noop(cfg);
+        let mut messages = vec![ChatMessage::user("data.txt 읽어줘")];
+        let cancel = AtomicBool::new(false);
+
+        run_turn(&client, &registry, &ctx, &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(messages.last().unwrap().content.as_deref(), Some("내용 확인."));
+    }
+
+    #[test]
+    fn synthesize_question_extracts_filename() {
+        let err = "오류: 파일 없음: C:/ws/발표자료.pdf. 주변 폴더에서도 같은 이름을 찾지 못했습니다. \
+                   다른 경로를 추측해 재시도하지 말고, 사용자에게 파일의 정확한 위치(폴더)를 물어보세요.";
+        let msgs = vec![ChatMessage::user("발표자료.pdf 요약해줘"), ChatMessage::tool("c1", err)];
+        let q = synthesize_location_question(&msgs).unwrap();
+        assert!(q.contains("발표자료.pdf"), "{q}");
+        assert!(q.contains("알려주"), "{q}");
+        // 마커 없는 이력에서는 합성하지 않는다
+        assert!(synthesize_location_question(&[ChatMessage::tool("c2", "오류: 기타")]).is_none());
+    }
+
+    /// 모델이 인자 파일명을 환각한 경우(사용자 발화에 없는 이름) 환각명을 질문에
+    /// 노출하지 않는다 (2026-06-12 R2 실측: '발표자료.pdf' → 'final_report.pdf' 영문화)
+    #[test]
+    fn synthesize_question_hides_hallucinated_filename() {
+        let err = "오류: 파일 없음: C:/ws/final_report.pdf. 주변 폴더에서도 같은 이름을 찾지 못했습니다. \
+                   다른 경로를 추측해 재시도하지 말고, 사용자에게 파일의 정확한 위치(폴더)를 물어보세요.";
+        let msgs = vec![ChatMessage::user("발표자료.pdf 요약해줘"), ChatMessage::tool("c1", err)];
+        let q = synthesize_location_question(&msgs).unwrap();
+        assert!(!q.contains("final_report"), "환각 파일명 노출: {q}");
+        assert!(q.contains("알려주") || q.contains("?"), "{q}");
     }
 
     /// 같은 (도구, 인자) 재호출은 실행하지 않고 모델에 안내 메시지를 돌려준다

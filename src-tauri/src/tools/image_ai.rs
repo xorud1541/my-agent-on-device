@@ -127,6 +127,10 @@ impl Tool for RemoveBackground {
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let input = req_str(args, "path")?;
+        // 존재 확인을 먼저 — 없는 파일이면 위치 힌트/질문 지시로 회복 경로를 준다
+        if !Path::new(input).exists() {
+            bail!(crate::tools::not_found_msg(input, &ctx.workspace()));
+        }
         let ext = Path::new(input)
             .extension()
             .and_then(|e| e.to_str())

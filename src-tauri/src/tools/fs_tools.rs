@@ -27,8 +27,15 @@ impl Tool for ListDir {
             "required": ["path"]
         })
     }
-    fn execute(&self, args: &Value, _ctx: &ToolCtx) -> Result<String> {
+    fn execute(&self, args: &Value, ctx: &ToolCtx) -> Result<String> {
         let path = req_str(args, "path")?;
+        // 없는 경로는 os 에러 대신 회복 지시(위치 힌트/사용자 질문)로 답한다
+        if !Path::new(path).exists() {
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
+        }
+        if Path::new(path).is_file() {
+            bail!("{path} 는 파일입니다. 내용을 보려면 read_file 을 사용하세요.");
+        }
         let mut lines = Vec::new();
         let mut total = 0usize;
         let entries = fs::read_dir(path).with_context(|| format!("디렉토리 열기 실패: {path}"))?;
@@ -83,10 +90,23 @@ impl Tool for ReadFile {
         let path = req_str(args, "path")?;
         // 존재 확인을 먼저 — 힌트가 os 에러 꼬리 없이 문장 끝에 오도록 (2B 주의 분산 방지)
         if !Path::new(path).exists() {
-            bail!(
-                "파일 없음: {path}.{}",
-                crate::tools::not_found_hint(path, &ctx.workspace())
-            );
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
+        }
+        // 바이너리 포맷은 전용 도구로 안내한다 — 2B 가 PDF/이미지를 read_file 로 읽어
+        // 원시 바이트로 컨텍스트를 오염시키는 배회를 차단 (2026-06-12 R3 실측)
+        let ext = Path::new(path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        match ext.as_str() {
+            "pdf" => bail!("PDF 파일입니다. 텍스트를 보려면 pdf_extract_text 를 사용하세요."),
+            "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tiff" | "tif" => {
+                bail!("이미지 파일입니다. 정보를 보려면 image_info 를 사용하세요.")
+            }
+            "zip" => {
+                bail!("압축 파일입니다. 내용을 보려면 zip_extract(list_only=true) 를 사용하세요.")
+            }
+            _ => {}
         }
         let meta = fs::metadata(path).with_context(|| format!("파일 정보 조회 실패: {path}"))?;
         let bytes = fs::read(path)?;
@@ -210,10 +230,7 @@ impl Tool for RenameFile {
         ensure_in_workspace(path, &ctx.workspace())?;
         let from = Path::new(path);
         if !from.exists() {
-            bail!(
-                "원본이 존재하지 않음: {path}.{}",
-                crate::tools::not_found_hint(path, &ctx.workspace())
-            );
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
         }
         // 새 이름에 점이 없고 원본이 확장자 있는 파일이면 확장자를 유지한다 —
         // 2B 가 "cat1으로 바꿔" 에서 확장자를 떨어뜨리는 실수를 도구가 흡수 (2026-06-12 실로그).
@@ -293,7 +310,7 @@ impl Tool for DeletePath {
         let path = req_str(args, "path")?;
         ensure_in_workspace(path, &ctx.workspace())?;
         if !Path::new(path).exists() {
-            bail!("경로 없음: {path}");
+            bail!(crate::tools::not_found_msg(path, &ctx.workspace()));
         }
         trash::delete(path).with_context(|| format!("휴지통 이동 실패: {path}"))?;
         Ok(format!("휴지통으로 이동 완료: {path}"))
@@ -342,6 +359,41 @@ mod tests {
         WriteFile
             .execute(&json!({"path": p, "content": "2", "overwrite": true}), &ctx)
             .unwrap();
+    }
+
+    /// PDF/이미지/zip 을 read_file 로 읽으면 전용 도구로 안내한다 — 원시 바이트가
+    /// 컨텍스트를 오염시키는 배회 차단 (2026-06-12 R3 실측)
+    #[test]
+    fn read_file_redirects_binary_formats_to_dedicated_tools() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        for (name, tool) in [
+            ("a.pdf", "pdf_extract_text"),
+            ("b.png", "image_info"),
+            ("c.zip", "zip_extract"),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "bin").unwrap();
+            let err = ReadFile
+                .execute(&json!({"path": p.to_string_lossy()}), &ctx)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(tool), "{name}: {err}");
+        }
+    }
+
+    /// list_dir 에 파일 경로가 오면 read_file 로 안내한다 (배회 차단)
+    #[test]
+    fn list_dir_on_file_redirects_to_read_file() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_with_workspace(dir.path());
+        let p = dir.path().join("x.txt");
+        std::fs::write(&p, "x").unwrap();
+        let err = ListDir
+            .execute(&json!({"path": p.to_string_lossy()}), &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("read_file"), "{err}");
     }
 
     #[test]
