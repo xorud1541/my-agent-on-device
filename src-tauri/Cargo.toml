@@ -3,10 +3,17 @@ name = "local-agent"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.77.2"
+# 바이너리가 2개(본 앱 + region-capture 헬퍼)라 `cargo run`(tauri dev)의 기본을 명시
+default-run = "local-agent"
 
 [lib]
 name = "local_agent_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# 자체 영역 캡처 오버레이 — webview 없는 순수 네이티브 창, 별도 프로세스(크래시 격리)
+[[bin]]
+name = "region-capture"
+path = "src/bin/region_capture.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -36,6 +43,9 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+# region-capture 헬퍼(자체 캡처 오버레이) 전용 — 본 앱 라이브러리에서는 사용하지 않는다
+winit = "0.30"
+softbuffer = "0.4"
 
 # ort onnxruntime 적재 — alian 과 동일하게 Windows 는 load-dynamic (MSVC LNK2038 회피).
 # onnxruntime.dll 은 vendor/onnxruntime/ 정본을 ORT_DYLIB_PATH 로 지정해 로드한다.

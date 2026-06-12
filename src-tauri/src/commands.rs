@@ -25,155 +25,100 @@ pub struct CaptureResult {
     pub height: u32,
 }
 
-/// 전체 캡처 결과. data_url 은 모달에 표시할 **다운스케일 프리뷰**(가벼운 JPEG).
-/// 실제 크롭은 path 의 원본(full 해상도)에서 수행한다.
-#[derive(Debug, Serialize)]
-pub struct FullCapture {
-    pub path: String,
-    pub data_url: String,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// 크롭 영역. 좌표/크기는 표시 이미지에 대한 **정규화 비율(0.0~1.0)** 이라 프리뷰 해상도와 무관하다.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct RegionRect {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-}
-
-/// 모달 프리뷰의 최대 변 길이. 전체 해상도 base64 를 IPC 로 보내던 병목을 제거하기 위함.
-const PREVIEW_MAX: u32 = 1600;
-
-/// 지정한 화면 좌표가 속한 모니터(현재 모니터)를 캡처해 캐시에 저장한다.
-/// 원본 PNG 는 크롭용으로 디스크에 두고, 모달 표시용으로는 다운스케일 JPEG 프리뷰만 반환한다.
-fn capture_to_cache(
-    cache_dir: std::path::PathBuf,
-    point: Option<(i32, i32)>,
-) -> Result<FullCapture, String> {
-    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("캐시 폴더 생성 실패: {e}"))?;
-
-    // 현재 모니터: 주어진 좌표가 속한 모니터, 못 찾으면 첫 모니터로 폴백.
-    let monitor = match point.and_then(|(x, y)| xcap::Monitor::from_point(x, y).ok()) {
-        Some(m) => m,
-        None => xcap::Monitor::all()
-            .map_err(|e| format!("모니터 조회 실패: {e}"))?
-            .into_iter()
-            .next()
-            .ok_or("사용 가능한 모니터가 없습니다")?,
-    };
-    let image = monitor.capture_image().map_err(|e| format!("화면 캡처 실패: {e}"))?;
-    let (width, height) = (image.width(), image.height());
-
-    let path = cache_dir.join(format!(
-        "capture_full_{}.png",
-        chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
-    ));
-    image.save(&path).map_err(|e| format!("캡처 저장 실패: {e}"))?;
-
-    // 프리뷰: 다운스케일 + JPEG → IPC 페이로드를 수 MB → 수백 KB 로 축소(속도 핵심).
-    // 원본(path)은 그대로 두고 크롭은 거기서 하므로 화질 손실 없음.
-    let dynimg = image::DynamicImage::ImageRgba8(
-        image::RgbaImage::from_raw(width, height, image.into_raw())
-            .ok_or("캡처 버퍼 변환 실패")?,
-    );
-    let preview = dynimg.thumbnail(PREVIEW_MAX, PREVIEW_MAX).to_rgb8();
-    let mut buf = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgb8(preview)
-        .write_to(&mut buf, image::ImageFormat::Jpeg)
-        .map_err(|e| format!("프리뷰 인코딩 실패: {e}"))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
-
-    Ok(FullCapture {
-        path: path.to_string_lossy().into_owned(),
-        data_url: format!("data:image/jpeg;base64,{b64}"),
-        width,
-        height,
-    })
-}
-
-/// 전체 캡처 이미지를 선택 영역(정규화 비율)으로 잘라 캐시에 저장하고, 썸네일과 함께 돌려준다.
-fn crop_to_cache(full_path: &str, rect: RegionRect) -> Result<CaptureResult, String> {
-    let full = image::open(full_path).map_err(|e| format!("캡처 로드 실패: {e}"))?;
-    let (pw, ph) = (full.width(), full.height());
-    // 정규화(0~1) → 원본 픽셀. 프리뷰 해상도와 무관하게 정확.
-    let clamp01 = |v: f64| v.clamp(0.0, 1.0);
-    let x = (clamp01(rect.x) * pw as f64).round() as u32;
-    let y = (clamp01(rect.y) * ph as f64).round() as u32;
-    let w = ((clamp01(rect.w) * pw as f64).round() as u32).clamp(1, pw - x.min(pw - 1));
-    let h = ((clamp01(rect.h) * ph as f64).round() as u32).clamp(1, ph - y.min(ph - 1));
-    let cropped = full.crop_imm(x.min(pw - 1), y.min(ph - 1), w, h);
-
-    let path = std::path::Path::new(full_path).with_file_name(format!(
-        "capture_{}.png",
-        chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
-    ));
-    cropped.save(&path).map_err(|e| format!("크롭 저장 실패: {e}"))?;
-
-    let thumb = cropped.thumbnail(320, 320);
+/// 캡처 파일을 첨부용 결과(320px 썸네일 base64 포함)로 마무리한다.
+fn finalize_capture(path: &std::path::Path) -> Result<CaptureResult, String> {
+    let img = image::open(path).map_err(|e| format!("캡처 로드 실패: {e}"))?;
+    let thumb = img.thumbnail(320, 320);
     let mut buf = std::io::Cursor::new(Vec::new());
     thumb
         .write_to(&mut buf, image::ImageFormat::Png)
         .map_err(|e| format!("썸네일 인코딩 실패: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
-
     Ok(CaptureResult {
         path: path.to_string_lossy().into_owned(),
         thumb_data_url: format!("data:image/png;base64,{b64}"),
-        width: cropped.width(),
-        height: cropped.height(),
+        width: img.width(),
+        height: img.height(),
     })
 }
 
-/// UI 주도 스크린샷: 앱 숨김 → **현재 모니터** 캡처 → 앱 복귀.
-/// 영역 선택은 프론트의 앱 내 모달에서 처리하고, 선택 결과로 crop_capture 를 호출한다.
-/// (두 번째 webview 창을 만들면 macOS WebKit 레이어트리 커밋에서 크래시 — 단일 창 유지가 핵심)
+/// 자체 영역 캡처 헬퍼(region-capture) 실행 파일 경로 — 본 앱과 같은 폴더에 빌드/동봉된다.
+fn region_capture_helper() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("실행 경로 조회 실패: {e}"))?;
+    let dir = exe.parent().ok_or("실행 폴더를 찾을 수 없습니다")?;
+    let name = if cfg!(windows) { "region-capture.exe" } else { "region-capture" };
+    let p = dir.join(name);
+    if p.exists() {
+        Ok(p)
+    } else {
+        Err(format!("캡처 헬퍼가 없습니다: {}", p.display()))
+    }
+}
+
+/// UI 주도 영역 캡처: 앱 숨김 → 자체 네이티브 오버레이 헬퍼(별도 프로세스)가 화면에 음영을
+/// 깔고 드래그 선택 → 선택 영역만 캐시에 저장 → 앱 복귀. 취소(Esc/우클릭)면 Ok(None).
+/// 헬퍼는 webview 가 아닌 순수 네이티브 창 + 별도 프로세스라 본 앱과 크래시가 격리된다.
 #[tauri::command]
-pub async fn capture_screenshot(app: AppHandle) -> Result<FullCapture, String> {
+pub async fn capture_region(app: AppHandle) -> Result<Option<CaptureResult>, String> {
     let cache_dir = app
         .path()
         .app_cache_dir()
         .map_err(|e| format!("앱 캐시 경로 조회 실패: {e}"))?
         .join("captures");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("캐시 폴더 생성 실패: {e}"))?;
+    let out = cache_dir.join(format!(
+        "capture_{}.png",
+        chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
+    ));
 
+    let helper = region_capture_helper()?;
     let main = app.get_webview_window("main");
-    // 현재 모니터 판정용 좌표: 앱 창이 놓인 모니터의 중심(물리 픽셀). 숨기기 전에 구한다.
-    let point = main.as_ref().and_then(|w| {
-        let mon = w.current_monitor().ok().flatten()?;
-        let pos = mon.position();
-        let size = mon.size();
-        Some((
-            pos.x + size.width as i32 / 2,
-            pos.y + size.height as i32 / 2,
-        ))
-    });
+    // 헬퍼가 캡처할 모니터 힌트: 앱 창이 있는 모니터의 중심 (논리 px — xcap from_point 기준)
+    let point = main
+        .as_ref()
+        .and_then(|w| {
+            let mon = w.current_monitor().ok().flatten()?;
+            let sf = mon.scale_factor();
+            let pos = mon.position().to_logical::<f64>(sf);
+            let size = mon.size().to_logical::<f64>(sf);
+            Some(((pos.x + size.width / 2.0) as i32, (pos.y + size.height / 2.0) as i32))
+        })
+        .unwrap_or((0, 0));
 
     if let Some(w) = &main {
         let _ = w.hide();
     }
-    // 창이 화면 프레임에서 빠지도록 짧게 대기 (최소화)
+    // 창이 화면 프레임에서 빠지도록 짧게 대기 — 헬퍼가 찍는 화면에 앱이 남지 않게
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
 
-    let result = tauri::async_runtime::spawn_blocking(move || capture_to_cache(cache_dir, point))
-        .await
-        .map_err(|e| format!("캡처 태스크 실패: {e}"))?;
+    let out2 = out.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(helper);
+        cmd.arg(&out2)
+            .arg(point.0.to_string())
+            .arg(point.1.to_string());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.status()
+    })
+    .await
+    .map_err(|e| format!("캡처 태스크 실패: {e}"))?;
 
-    // 성공/실패와 무관하게 창 복구
+    // 성공/취소/실패와 무관하게 창 복구
     if let Some(w) = &main {
         let _ = w.show();
         let _ = w.set_focus();
     }
-    result
-}
 
-/// 캡처 원본을 선택 영역으로 잘라 첨부용 결과를 돌려준다 (앱 내 모달에서 호출).
-#[tauri::command]
-pub async fn crop_capture(full_path: String, rect: RegionRect) -> Result<CaptureResult, String> {
-    tauri::async_runtime::spawn_blocking(move || crop_to_cache(&full_path, rect))
-        .await
-        .map_err(|e| format!("크롭 태스크 실패: {e}"))?
+    match status {
+        Err(e) => Err(format!("캡처 헬퍼 실행 실패: {e}")),
+        Ok(_) if out.exists() => finalize_capture(&out).map(Some),
+        Ok(_) => Ok(None), // 취소(Esc/우클릭) 또는 미선택
+    }
 }
 
 fn emit_event(app: &AppHandle, ev: AgentEvent) {

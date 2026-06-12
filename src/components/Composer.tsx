@@ -1,17 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { FormEvent, KeyboardEvent, useRef, useState } from "react";
-import { RegionOverlay } from "./RegionOverlay";
 
 interface Attachment {
   path: string;
   thumb: string;
-}
-
-interface FullCapture {
-  path: string;
-  data_url: string;
-  width: number;
-  height: number;
 }
 
 interface Props {
@@ -21,12 +13,34 @@ interface Props {
   onCancel: () => void;
 }
 
+/** 영역 선택 프레임 아이콘 — 모서리 브래킷 + 중앙 점 (앱 톤에 맞춘 미니멀 스트로크) */
+function CaptureIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 9V6a2 2 0 0 1 2-2h3" />
+      <path d="M15 4h3a2 2 0 0 1 2 2v3" />
+      <path d="M20 15v3a2 2 0 0 1-2 2h-3" />
+      <path d="M9 20H6a2 2 0 0 1-2-2v-3" />
+      <circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function Composer({ busy, disabled, onSend, onCancel }: Props) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const [pending, setPending] = useState<FullCapture | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !busy && !disabled;
@@ -52,9 +66,9 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
     setCaptureError(null);
     setCapturing(true);
     try {
-      // 앱 숨김 → 전체 캡처 → 복귀. 영역 선택은 앱 내 모달에서 이어진다.
-      const full = await invoke<FullCapture>("capture_screenshot");
-      setPending(full);
+      // 앱 숨김 → 자체 오버레이(별도 프로세스)에서 화면 음영+드래그 → 선택 영역만 반환
+      const r = await invoke<{ path: string; thumb_data_url: string } | null>("capture_region");
+      if (r) setAttachments((a) => [...a, { path: r.path, thumb: r.thumb_data_url }]);
     } catch (err) {
       setCaptureError(String(err));
     } finally {
@@ -66,17 +80,6 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
 
   return (
     <div className="composer-wrap">
-      {pending && (
-        <RegionOverlay
-          src={pending.data_url}
-          fullPath={pending.path}
-          onDone={(att) => {
-            setAttachments((a) => [...a, att]);
-            setPending(null);
-          }}
-          onCancel={() => setPending(null)}
-        />
-      )}
       {captureError && <div className="capture-error">캡처 실패: {captureError}</div>}
       {attachments.length > 0 && (
         <div className="composer-attachments">
@@ -93,18 +96,18 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
       <form className="composer" onSubmit={submit}>
         <button
           type="button"
-          className="capture-btn"
-          title="스크린샷 첨부"
+          className={capturing ? "capture-btn busy" : "capture-btn"}
+          title="화면 영역 캡처"
           onClick={capture}
           disabled={disabled || busy || capturing}
         >
-          {capturing ? "…" : "📷"}
+          <CaptureIcon />
         </button>
         <textarea
           ref={taRef}
           rows={1}
           value={text}
-          placeholder={disabled ? "모델 로딩 중…" : "무엇을 도와드릴까요? (📷 로 화면을 첨부할 수 있어요)"}
+          placeholder={disabled ? "모델 로딩 중…" : "무엇을 도와드릴까요? (왼쪽 버튼으로 화면을 첨부할 수 있어요)"}
           onChange={(e) => {
             setText(e.target.value);
             e.target.style.height = "auto";
