@@ -43,6 +43,19 @@ impl HttpLlmClient {
     pub fn new(base_url: String, max_tokens: u32) -> Self {
         Self { base_url, max_tokens, http: reqwest::Client::new() }
     }
+
+    /// 서버가 /health 로 살아날 때까지 최대 `secs` 초 대기 (크래시 후 사이드카 재기동 대비)
+    async fn wait_for_health(&self, secs: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Ok(r) = self.http.get(format!("{}/health", self.base_url)).send().await {
+                if r.status().is_success() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// 모델 재생성으로 해소될 수 있는 일시 오류인가?
@@ -74,15 +87,26 @@ impl LlmClient for HttpLlmClient {
         });
 
         // 파싱 계열 500은 스트림 시작 전에 떨어지므로(델타 미방출) 재요청이 안전하다.
+        // 연결 오류(10054 등)도 전송 단계라 델타 미방출 — llama-server 가 크래시해도
+        // 사이드카 슈퍼바이저가 재기동하므로, health 회복을 기다렸다 재시도하면 턴이
+        // 살아남는다 (2026-06-12 실측: 하니스 2회 연속 서버 크래시로 턴 전체 사망).
         let mut resp = None;
         for attempt in 1..=MAX_ATTEMPTS {
-            let r = self
+            let r = match self
                 .http
                 .post(format!("{}/v1/chat/completions", self.base_url))
                 .json(&body)
                 .send()
                 .await
-                .context("llama-server 요청 실패")?;
+            {
+                Ok(r) => r,
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    self.wait_for_health(30).await;
+                    let _ = e;
+                    continue;
+                }
+                Err(e) => return Err(e).context("llama-server 요청 실패"),
+            };
             if r.status().is_success() {
                 resp = Some(r);
                 break;
