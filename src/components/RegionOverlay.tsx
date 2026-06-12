@@ -76,21 +76,20 @@ export function RegionOverlay({ src, fullPath, onDone, onCancel }: Props) {
     const img = imgRef.current;
     if (!img) return;
     const box = img.getBoundingClientRect();
-    // 렌더된 이미지 박스 기준 좌표 → 원본 픽셀로 환산
-    const scaleX = img.naturalWidth / box.width;
-    const scaleY = img.naturalHeight / box.height;
-    const px = {
-      x: (rect.x - box.left) * scaleX,
-      y: (rect.y - box.top) * scaleY,
-      w: rect.w * scaleX,
-      h: rect.h * scaleY,
+    // 렌더된 이미지 박스 기준 → 정규화 비율(0~1). 프리뷰 해상도와 무관하게 원본에서 정확히 크롭됨.
+    const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+    const norm = {
+      x: clamp01((rect.x - box.left) / box.width),
+      y: clamp01((rect.y - box.top) / box.height),
+      w: clamp01(rect.w / box.width),
+      h: clamp01(rect.h / box.height),
     };
     setBusy(true);
     doneRef.current = true;
     try {
       const r = await invoke<{ path: string; thumb_data_url: string }>("crop_capture", {
         fullPath,
-        rect: px,
+        rect: norm,
       });
       onDone({ path: r.path, thumb: r.thumb_data_url });
     } catch {

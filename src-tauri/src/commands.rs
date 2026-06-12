@@ -25,7 +25,8 @@ pub struct CaptureResult {
     pub height: u32,
 }
 
-/// 전체 캡처 결과. data_url 은 앱 안의 영역 선택 모달이 표시할 전체 스크린샷이다.
+/// 전체 캡처 결과. data_url 은 모달에 표시할 **다운스케일 프리뷰**(가벼운 JPEG).
+/// 실제 크롭은 path 의 원본(full 해상도)에서 수행한다.
 #[derive(Debug, Serialize)]
 pub struct FullCapture {
     pub path: String,
@@ -34,7 +35,7 @@ pub struct FullCapture {
     pub height: u32,
 }
 
-/// 크롭 영역. 좌표/크기는 캡처 원본의 픽셀 단위(프론트가 렌더된 이미지 박스로 환산해 보냄).
+/// 크롭 영역. 좌표/크기는 표시 이미지에 대한 **정규화 비율(0.0~1.0)** 이라 프리뷰 해상도와 무관하다.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RegionRect {
     pub x: f64,
@@ -43,12 +44,26 @@ pub struct RegionRect {
     pub h: f64,
 }
 
-/// 주 모니터 전체를 캡처해 캐시에 저장하고, 경로/전체 data URL/크기를 돌려준다.
-fn capture_full_to_cache(cache_dir: std::path::PathBuf) -> Result<FullCapture, String> {
+/// 모달 프리뷰의 최대 변 길이. 전체 해상도 base64 를 IPC 로 보내던 병목을 제거하기 위함.
+const PREVIEW_MAX: u32 = 1600;
+
+/// 지정한 화면 좌표가 속한 모니터(현재 모니터)를 캡처해 캐시에 저장한다.
+/// 원본 PNG 는 크롭용으로 디스크에 두고, 모달 표시용으로는 다운스케일 JPEG 프리뷰만 반환한다.
+fn capture_to_cache(
+    cache_dir: std::path::PathBuf,
+    point: Option<(i32, i32)>,
+) -> Result<FullCapture, String> {
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("캐시 폴더 생성 실패: {e}"))?;
-    let monitors = xcap::Monitor::all().map_err(|e| format!("모니터 조회 실패: {e}"))?;
-    // index 0 = 주 모니터 (기존 screen_capture 도구와 동일 관례)
-    let monitor = monitors.into_iter().next().ok_or("사용 가능한 모니터가 없습니다")?;
+
+    // 현재 모니터: 주어진 좌표가 속한 모니터, 못 찾으면 첫 모니터로 폴백.
+    let monitor = match point.and_then(|(x, y)| xcap::Monitor::from_point(x, y).ok()) {
+        Some(m) => m,
+        None => xcap::Monitor::all()
+            .map_err(|e| format!("모니터 조회 실패: {e}"))?
+            .into_iter()
+            .next()
+            .ok_or("사용 가능한 모니터가 없습니다")?,
+    };
     let image = monitor.capture_image().map_err(|e| format!("화면 캡처 실패: {e}"))?;
     let (width, height) = (image.width(), image.height());
 
@@ -58,25 +73,38 @@ fn capture_full_to_cache(cache_dir: std::path::PathBuf) -> Result<FullCapture, S
     ));
     image.save(&path).map_err(|e| format!("캡처 저장 실패: {e}"))?;
 
-    let bytes = std::fs::read(&path).map_err(|e| format!("캡처 읽기 실패: {e}"))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    // 프리뷰: 다운스케일 + JPEG → IPC 페이로드를 수 MB → 수백 KB 로 축소(속도 핵심).
+    // 원본(path)은 그대로 두고 크롭은 거기서 하므로 화질 손실 없음.
+    let dynimg = image::DynamicImage::ImageRgba8(
+        image::RgbaImage::from_raw(width, height, image.into_raw())
+            .ok_or("캡처 버퍼 변환 실패")?,
+    );
+    let preview = dynimg.thumbnail(PREVIEW_MAX, PREVIEW_MAX).to_rgb8();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(preview)
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("프리뷰 인코딩 실패: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
+
     Ok(FullCapture {
         path: path.to_string_lossy().into_owned(),
-        data_url: format!("data:image/png;base64,{b64}"),
+        data_url: format!("data:image/jpeg;base64,{b64}"),
         width,
         height,
     })
 }
 
-/// 전체 캡처 이미지를 선택 영역(원본 픽셀)으로 잘라 캐시에 저장하고, 썸네일과 함께 돌려준다.
+/// 전체 캡처 이미지를 선택 영역(정규화 비율)으로 잘라 캐시에 저장하고, 썸네일과 함께 돌려준다.
 fn crop_to_cache(full_path: &str, rect: RegionRect) -> Result<CaptureResult, String> {
     let full = image::open(full_path).map_err(|e| format!("캡처 로드 실패: {e}"))?;
     let (pw, ph) = (full.width(), full.height());
-    let x = (rect.x.round()).clamp(0.0, pw.saturating_sub(1) as f64) as u32;
-    let y = (rect.y.round()).clamp(0.0, ph.saturating_sub(1) as f64) as u32;
-    let w = (rect.w.round()).clamp(1.0, (pw - x) as f64) as u32;
-    let h = (rect.h.round()).clamp(1.0, (ph - y) as f64) as u32;
-    let cropped = full.crop_imm(x, y, w, h);
+    // 정규화(0~1) → 원본 픽셀. 프리뷰 해상도와 무관하게 정확.
+    let clamp01 = |v: f64| v.clamp(0.0, 1.0);
+    let x = (clamp01(rect.x) * pw as f64).round() as u32;
+    let y = (clamp01(rect.y) * ph as f64).round() as u32;
+    let w = ((clamp01(rect.w) * pw as f64).round() as u32).clamp(1, pw - x.min(pw - 1));
+    let h = ((clamp01(rect.h) * ph as f64).round() as u32).clamp(1, ph - y.min(ph - 1));
+    let cropped = full.crop_imm(x.min(pw - 1), y.min(ph - 1), w, h);
 
     let path = std::path::Path::new(full_path).with_file_name(format!(
         "capture_{}.png",
@@ -94,12 +122,12 @@ fn crop_to_cache(full_path: &str, rect: RegionRect) -> Result<CaptureResult, Str
     Ok(CaptureResult {
         path: path.to_string_lossy().into_owned(),
         thumb_data_url: format!("data:image/png;base64,{b64}"),
-        width: w,
-        height: h,
+        width: cropped.width(),
+        height: cropped.height(),
     })
 }
 
-/// UI 주도 스크린샷: 앱 숨김 → 주 모니터 전체 캡처 → 앱 복귀.
+/// UI 주도 스크린샷: 앱 숨김 → **현재 모니터** 캡처 → 앱 복귀.
 /// 영역 선택은 프론트의 앱 내 모달에서 처리하고, 선택 결과로 crop_capture 를 호출한다.
 /// (두 번째 webview 창을 만들면 macOS WebKit 레이어트리 커밋에서 크래시 — 단일 창 유지가 핵심)
 #[tauri::command]
@@ -111,13 +139,24 @@ pub async fn capture_screenshot(app: AppHandle) -> Result<FullCapture, String> {
         .join("captures");
 
     let main = app.get_webview_window("main");
+    // 현재 모니터 판정용 좌표: 앱 창이 놓인 모니터의 중심(물리 픽셀). 숨기기 전에 구한다.
+    let point = main.as_ref().and_then(|w| {
+        let mon = w.current_monitor().ok().flatten()?;
+        let pos = mon.position();
+        let size = mon.size();
+        Some((
+            pos.x + size.width as i32 / 2,
+            pos.y + size.height as i32 / 2,
+        ))
+    });
+
     if let Some(w) = &main {
         let _ = w.hide();
     }
-    // 창이 화면 프레임에서 빠지도록 짧게 대기
-    tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+    // 창이 화면 프레임에서 빠지도록 짧게 대기 (최소화)
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
 
-    let result = tauri::async_runtime::spawn_blocking(move || capture_full_to_cache(cache_dir))
+    let result = tauri::async_runtime::spawn_blocking(move || capture_to_cache(cache_dir, point))
         .await
         .map_err(|e| format!("캡처 태스크 실패: {e}"))?;
 
