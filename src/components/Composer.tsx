@@ -43,8 +43,8 @@ export function Composer({ busy, disabled, onSend, onCancel }: Props) {
     setCaptureError(null);
     setCapturing(true);
     try {
-      const r = await invoke<{ path: string; thumb_data_url: string }>("capture_screenshot");
-      setAttachments((a) => [...a, { path: r.path, thumb: r.thumb_data_url }]);
+      const r = await invoke<{ path: string; thumb_data_url: string } | null>("capture_screenshot");
+      if (r) setAttachments((a) => [...a, { path: r.path, thumb: r.thumb_data_url }]);
     } catch (err) {
       setCaptureError(String(err));
     } finally {

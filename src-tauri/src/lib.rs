@@ -23,6 +23,10 @@ pub struct AppState {
     pub sessions: Mutex<HashMap<String, Vec<ChatMessage>>>,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub registry: Arc<ToolRegistry>,
+    /// 영역 선택 오버레이가 선택 결과(rect 또는 취소)를 capture_screenshot 으로 돌려보내는 통로
+    pub region_tx: Mutex<Option<tokio::sync::oneshot::Sender<Option<commands::RegionRect>>>>,
+    /// 오버레이가 표시할 전체 스크린샷(base64 data URL). 선택 중에만 채워진다.
+    pub region_image: Mutex<Option<String>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -34,6 +38,8 @@ pub fn run() {
             sessions: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             registry: Arc::new(ToolRegistry::with_default_tools()),
+            region_tx: Mutex::new(None),
+            region_image: Mutex::new(None),
         })
         .setup(|app| {
             // 앱 시작과 동시에 모델 로드 (쿼리 경로에서 로드 시간 제거)
@@ -52,6 +58,9 @@ pub fn run() {
             commands::new_session,
             commands::send_message,
             commands::capture_screenshot,
+            commands::region_get_image,
+            commands::region_finish,
+            commands::region_cancel,
             commands::cancel_turn,
             commands::pick_folder,
             commands::list_sessions,
