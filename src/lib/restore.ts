@@ -16,7 +16,11 @@ export function chatToUi(messages: ChatMessage[]): UiMessage[] {
   let current: AssistantMessage | null = null;
   for (const m of messages) {
     if (m.role === "user") {
-      out.push({ role: "user", text: m.content ?? "" });
+      // 백엔드가 붙인 '[첨부 이미지: ...]' 마커는 표시용 텍스트에서 제거
+      const raw = m.content ?? "";
+      const text = raw.replace(/\n\n\[첨부 이미지: [^\]]*\]\s*$/, "");
+      const images = (m.images ?? []).map((path) => ({ path, thumb: "" }));
+      out.push({ role: "user", text, images: images.length ? images : undefined });
       current = null;
     } else if (m.role === "assistant") {
       if (!current) {
