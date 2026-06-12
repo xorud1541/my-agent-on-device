@@ -124,6 +124,13 @@ pub fn tools_to_exclude(user_text: &str) -> Vec<&'static str> {
     if !WS_KEYWORDS.iter().any(|k| user_text.contains(k)) {
         out.push("set_workspace");
     }
+    // screen_capture 도 양성 게이트: 화면/캡처를 직접 말한 턴에만 노출.
+    // (2026-06-12 실로그: "귀여워" 잡담에 4K 화면 캡처 발사 — 잡담·파일 턴에서
+    //  정당한 트리거가 없는 도구는 보이는 것 자체가 오발사 위험)
+    const CAPTURE_KEYWORDS: &[&str] = &["화면", "캡처", "캡쳐", "스크린", "찍"];
+    if !CAPTURE_KEYWORDS.iter().any(|k| user_text.contains(k)) {
+        out.push("screen_capture");
+    }
     out
 }
 
@@ -587,8 +594,10 @@ pub async fn run_turn(
         !(m.role == "assistant" && m.content.as_deref().is_some_and(|c| !c.is_empty()))
     });
     if ended_without_answer {
+        // 사용자에게도 보일 수 있는 문장이므로(세션 복원/빈 답변 턴) 자연스럽게 쓴다.
+        // 모델용 신호("새로 진행")와 사용자용 안내를 겸한다.
         messages.push(ChatMessage::assistant(
-            Some("(이전 요청은 완료되지 않은 채 중단됨. 사용자의 다음 요청만 새로 수행한다.)".into()),
+            Some("이 작업은 완료되지 않은 채 중단되었습니다. 다음 요청부터 새로 진행합니다.".into()),
             None,
         ));
     }
@@ -1446,6 +1455,17 @@ mod tests {
         assert!(!tools_to_exclude("압축 풀고 원본 압축파일은 지워줘").contains(&"zip_extract"));
         // 압축 생성 복합("압축해서 원본 지워줘")을 위해 zip_create 는 건드리지 않는다
         assert!(!tools_to_exclude("이미지들 압축해서 원본은 지워줘").contains(&"zip_create"));
+    }
+
+    /// screen_capture 는 화면/캡처를 직접 언급한 턴에만 노출한다
+    /// (2026-06-12 실로그: "귀여워" 잡담에 4K 화면 캡처 발사 — 159초 + 섬뜩한 UX)
+    #[test]
+    fn screen_capture_hidden_unless_mentioned() {
+        assert!(tools_to_exclude("귀여워").contains(&"screen_capture"));
+        assert!(tools_to_exclude("이미지들 압축해줘").contains(&"screen_capture"));
+        assert!(!tools_to_exclude("화면 캡처해줘").contains(&"screen_capture"));
+        assert!(!tools_to_exclude("지금 스크린샷 찍어줘").contains(&"screen_capture"));
+        assert!(!tools_to_exclude("화면 찍어서 저장해").contains(&"screen_capture"));
     }
 
     /// set_workspace 는 사용자가 워크스페이스를 직접 언급한 턴에만 노출한다.
