@@ -152,6 +152,25 @@ struct ImageUrl { url: String }
 - 오버레이 창은 같은 번들을 `index.html?overlay=1` 로 로드, `main.tsx` 가 `RegionOverlay` 렌더.
   `region-overlay` 라벨을 capability `windows` 에 추가.
 
+### Addendum 2 (2026-06-12): 두 번째 webview 창 → 앱 내 모달
+
+별도 전체화면 webview 창(`region-overlay`) 방식은 **macOS에서 WebKit 크래시**를 일으켰다.
+크래시 리포트: `RemoteLayerTreeDrawingAreaProxyMac::displayLink()` 에서 SIGSEGV(메인 스레드,
+KERN_INVALID_ADDRESS). 📷 클릭으로 두 번째 WKWebView 창을 만드는 순간 레이어트리 커밋이
+널을 참조하며 앱 전체가 종료됐다. 두 번째 webview 창 생성 자체가 근본 원인.
+
+해결: **두 번째 창을 만들지 않는다(단일 webview 유지).** 영역 선택을 메인 창 내부의
+전체화면 React 모달(`RegionOverlay`)로 처리한다.
+
+- `capture_screenshot`: 앱 숨김 → 주 모니터 전체 캡처(캐시) → 앱 복귀, `FullCapture{path,
+  data_url, width, height}` 반환. 오버레이 창/oneshot/capability 모두 제거.
+- 프론트: 반환된 전체 스크린샷을 앱 내 모달에 띄우고(중앙 contain), 드래그로 사각형 선택.
+- 좌표 환산: 렌더된 `<img>` 의 `getBoundingClientRect` 와 `naturalWidth/Height` 로 선택 영역을
+  **원본 픽셀**로 환산해 `crop_capture(full_path, rect{x,y,w,h})` 호출 → 크롭 결과만 첨부.
+- 취소: Esc/우클릭/너무 작은 선택은 모달만 닫음.
+- 트레이드오프: 실제 화면 위가 아니라 앱 창 안에 띄운 스크린샷 위에서 선택하지만, 단일 webview라
+  크래시가 없고 Win/macOS 동일 동작.
+
 ## 핵심 리스크
 
 1. **멀티모달 content 표현/영속화** — `MessageContent` 도입의 블라스트 반경(agent.rs 문자열 접근 지점).
