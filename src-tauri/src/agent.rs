@@ -54,7 +54,9 @@ pub fn system_prompt(cfg: &AppConfig) -> String {
 
 /// 페르소나/라포 형성 지시. 이름을 알면 친근한 말투, 모르면 대화 초반에 자연스럽게 묻는다.
 fn persona_section(cfg: &AppConfig) -> String {
+    // 설정에 '태경님'처럼 님까지 저장된 경우 이중 호칭(태경님님) 방지 — 페르소나가 님을 붙인다
     let user = cfg.user_name.trim();
+    let user = user.strip_suffix("님").unwrap_or(user).trim();
     let agent = cfg.agent_name.trim();
     match (user.is_empty(), agent.is_empty()) {
         (false, false) => format!(
@@ -1376,6 +1378,18 @@ mod tests {
         assert!(!p.contains("update_profile"), "제거된 도구가 프롬프트에 남음");
         assert!(p.contains("지어달라고"), "이름 지어달라는 지시 없음");
         assert!(p.contains("설정"), "이름 저장 경로(설정 패널) 안내 없음");
+    }
+
+    /// 설정에 '태경님'처럼 님까지 저장돼 있어도 이중 호칭(태경님님)이 되지 않는다
+    /// (2026-06-12 실로그: 제거된 update_profile 이 남긴 user_name="태경님" → "태경님님")
+    #[test]
+    fn prompt_strips_trailing_honorific_from_user_name() {
+        let mut cfg = AppConfig::default();
+        cfg.user_name = "태경님".into();
+        cfg.agent_name = "쫄병".into();
+        let p = system_prompt(&cfg);
+        assert!(p.contains("'태경'"), "님을 뗀 이름이어야 함: {p}");
+        assert!(!p.contains("태경님님"), "{p}");
     }
 
     #[test]
