@@ -343,20 +343,77 @@ pub fn refresh_system_prompt(messages: &mut [ChatMessage], cfg: &AppConfig) {
     *first = ChatMessage::system(prompt);
 }
 
+/// 본문에 섞이는 도구 호출 마크업의 시작 표지
+const MARKUP_MARKERS: &[&str] = &["<tool_call", "<function="];
+
 /// 본문 텍스트에 섞여 나온 도구 호출 마크업("<tool_call>", "<function=")을 걷어낸다.
 /// 서버가 파싱하지 못한 잘못된 형식의 호출 시도는 텍스트로 흘러들어오는데,
 /// 그대로 두면 사용자 답변에 노출된다 (2026-06-12 적대 테스트 S3에서 확인).
 /// 마크업 이후는 전부 호출 시도이므로 앞부분의 진짜 답변만 남긴다.
 fn strip_tool_markup(content: &mut String) {
-    let cut = ["<tool_call", "<function="]
-        .iter()
-        .filter_map(|m| content.find(m))
-        .min();
+    let cut = MARKUP_MARKERS.iter().filter_map(|m| content.find(m)).min();
     if let Some(pos) = cut {
         content.truncate(pos);
         let trimmed = content.trim_end().len();
         content.truncate(trimmed);
     }
+}
+
+/// 본문 스트림에서 도구 마크업이 시작되면 그 지점부터 UI 방출을 차단한다.
+/// strip_tool_markup 은 저장 단계에서만 동작 — 스트리밍 델타는 이미 UI 로 나간 뒤라
+/// "<tool_call> <function=...>" 이 사용자 답변에 그대로 보였다 (2026-06-12 기획자 테스트).
+/// 마커가 델타 경계에서 쪼개질 수 있으므로 마커 접두사일 수 있는 꼬리는 보류한다.
+#[derive(Default)]
+struct MarkupStreamGuard {
+    pending: String,
+    blocked: bool,
+}
+
+impl MarkupStreamGuard {
+    /// 델타를 받아 지금 안전하게 방출할 수 있는 텍스트를 돌려준다
+    fn push(&mut self, delta: &str) -> String {
+        if self.blocked {
+            return String::new();
+        }
+        self.pending.push_str(delta);
+        if let Some(pos) = MARKUP_MARKERS.iter().filter_map(|m| self.pending.find(m)).min() {
+            self.blocked = true;
+            let out = self.pending[..pos].trim_end().to_string();
+            self.pending.clear();
+            return out;
+        }
+        let hold = marker_prefix_suffix_len(&self.pending);
+        let cut = self.pending.len() - hold; // 보류 꼬리는 ASCII 마커 접두사라 경계 안전
+        let out = self.pending[..cut].to_string();
+        self.pending.drain(..cut);
+        out
+    }
+
+    /// 스트림 종료: 보류 꼬리를 돌려주고 다음 완성을 위해 초기화한다
+    fn finish(&mut self) -> String {
+        let out = if self.blocked { String::new() } else { std::mem::take(&mut self.pending) };
+        self.pending.clear();
+        self.blocked = false;
+        out
+    }
+}
+
+/// 문자열 끝부분이 마커의 접두사와 일치하는 최대 길이 (스트림 경계 보류용)
+fn marker_prefix_suffix_len(s: &str) -> usize {
+    let max_check = MARKUP_MARKERS
+        .iter()
+        .map(|m| m.len() - 1)
+        .max()
+        .unwrap_or(0)
+        .min(s.len());
+    for k in (1..=max_check).rev() {
+        if let Some(suffix) = s.get(s.len() - k..) {
+            if MARKUP_MARKERS.iter().any(|m| m.starts_with(suffix)) {
+                return k;
+            }
+        }
+    }
+    0
 }
 
 /// 턴이 중단(라운드 한도/취소)되어 마지막 assistant 의 tool_calls 에 결과가 없으면
@@ -436,20 +493,36 @@ pub async fn run_turn(
             registry.schemas_excluding(&hidden)
         };
 
+        // 본문 마크업 방출 차단 가드 — 라운드 내 모든 완성(본 호출/재시도/마무리)이
+        // 공유하고, 각 완성이 끝날 때 finish() 로 보류 꼬리를 방출하며 초기화한다.
+        let markup_guard = std::sync::Mutex::new(MarkupStreamGuard::default());
         let mut sink = |kind: DeltaKind, text: &str| -> bool {
-            let ev = match kind {
-                DeltaKind::Thinking => AgentEvent::ThinkingDelta {
+            match kind {
+                DeltaKind::Thinking => emit(AgentEvent::ThinkingDelta {
                     session_id: session_id.to_string(),
                     delta: text.to_string(),
-                },
-                DeltaKind::Text => AgentEvent::TextDelta {
-                    session_id: session_id.to_string(),
-                    delta: text.to_string(),
-                },
-            };
-            emit(ev);
+                }),
+                DeltaKind::Text => {
+                    let safe = markup_guard.lock().unwrap().push(text);
+                    if !safe.is_empty() {
+                        emit(AgentEvent::TextDelta {
+                            session_id: session_id.to_string(),
+                            delta: safe,
+                        });
+                    }
+                }
+            }
             // false 반환 시 클라이언트가 스트림을 끊는다 — 생성 중에도 ■ 버튼이 즉시 듣게
             !cancel.load(Ordering::Relaxed)
+        };
+        let flush_stream_tail = || {
+            let tail = markup_guard.lock().unwrap().finish();
+            if !tail.is_empty() {
+                emit(AgentEvent::TextDelta {
+                    session_id: session_id.to_string(),
+                    delta: tail,
+                });
+            }
         };
         let mut result = match client.complete(messages, &tools, temperature, &mut sink).await {
             Ok(r) => r,
@@ -459,10 +532,12 @@ pub async fn run_turn(
                 if compacted == 0 {
                     return Err(e);
                 }
+                flush_stream_tail();
                 client.complete(messages, &tools, temperature, &mut sink).await?
             }
             Err(e) => return Err(e),
         };
+        flush_stream_tail();
 
         // 모델이 인자 JSON 을 완성하지 못한 툴콜(미종결 문자열 등)을 그대로 이력에 쌓으면
         // 이후 모든 요청에서 서버의 챗 템플릿 렌더링이 깨져 세션이 회복 불능이 된다
@@ -614,6 +689,7 @@ pub async fn run_turn(
         if must_finish && !cancel.load(Ordering::Relaxed) {
             let no_tools = Value::Array(vec![]);
             let mut final_result = client.complete(messages, &no_tools, temperature, &mut sink).await?;
+            flush_stream_tail();
             // 도구를 떼고 물어도 2B 는 마크업을 텍스트로 뱉을 수 있다 (2026-06-12 적대 테스트)
             strip_tool_markup(&mut final_result.content);
             if !final_result.content.is_empty() {
@@ -848,12 +924,35 @@ fn synthesize_failure_note(messages: &[ChatMessage], had_success: bool) -> Optio
         .filter(|m| m.role == "tool")
         .filter_map(|m| m.content.as_deref())
         .find(|c| c.starts_with("오류:"))?;
-    let reason = clip(err.trim_start_matches("오류:").trim(), 140);
+    let reason = clip(&strip_model_directives(err.trim_start_matches("오류:").trim()), 140);
     Some(if had_success {
         format!("요청 중 일부는 완료했지만 마지막 단계는 실패했어요. 이유: {reason}")
     } else {
         format!("요청하신 작업을 완료하지 못했어요. 이유: {reason}")
     })
+}
+
+/// 도구 오류 속 모델용 지시("이 사실을 그대로 사용자에게 알리세요" 등)를 걷어내고
+/// 사용자에게 보여줄 사실 부분만 남긴다 — 합성 노트가 내부 지시문을 그대로 인용해
+/// 사용자에게 노출됐다 (2026-06-12 기획자 테스트 직후 실측).
+fn strip_model_directives(reason: &str) -> String {
+    const DIRECTIVE_STARTS: &[&str] = &[
+        "이 사실을 그대로",
+        "다른 경로를 추측해",
+        "요청한 파일이 이 중에",
+        "사용자에게 파일의 정확한 위치",
+        "제공된 도구 목록에서",
+    ];
+    let cut = DIRECTIVE_STARTS
+        .iter()
+        .filter_map(|d| reason.find(d))
+        .min()
+        .unwrap_or(reason.len());
+    reason[..cut]
+        .trim_end()
+        .trim_end_matches(['—', '-', ','])
+        .trim_end()
+        .to_string()
 }
 
 fn clip(s: &str, max_chars: usize) -> String {
@@ -1585,14 +1684,65 @@ mod tests {
         }]);
         let registry = ToolRegistry::with_default_tools();
         let mut messages = vec![ChatMessage::user("유니콘.png 찾아줘")];
+        let events = Mutex::new(Vec::new());
         let cancel = AtomicBool::new(false);
 
-        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|_| {})
-            .await
-            .unwrap();
+        run_turn(&client, &registry, &noop_ctx(), &mut messages, "s1", 8, 0.7, &cancel, &|ev| {
+            events.lock().unwrap().push(ev)
+        })
+        .await
+        .unwrap();
 
         let answer = messages.last().unwrap().content.as_deref().unwrap();
         assert_eq!(answer, "검색 결과가 없습니다.");
+        // 저장뿐 아니라 스트리밍 델타에도 마크업이 새면 안 된다 (2026-06-12 기획자 테스트)
+        for ev in events.lock().unwrap().iter() {
+            if let AgentEvent::TextDelta { delta, .. } = ev {
+                assert!(!delta.contains("<tool_call"), "스트림 누출: {delta}");
+                assert!(!delta.contains("<function="), "스트림 누출: {delta}");
+            }
+        }
+    }
+
+    /// 마크업 스트림 가드: 마커 앞 텍스트만 방출하고, 경계에 걸친 마커도 잡는다
+    #[test]
+    fn markup_stream_guard_blocks_split_markers() {
+        // 한 델타에 통째로 온 마커
+        let mut g = MarkupStreamGuard::default();
+        assert_eq!(g.push("답변입니다. <tool_call> <function=x>"), "답변입니다.");
+        assert_eq!(g.push(" 더 많은 마크업"), "");
+        assert_eq!(g.finish(), "");
+
+        // 델타 경계에서 쪼개진 마커 ("<tool" + "_call>")
+        let mut g = MarkupStreamGuard::default();
+        let first = g.push("안녕하세요 <tool");
+        assert!(first.starts_with("안녕하세요"), "{first}");
+        assert!(!first.contains("<tool"), "마커 접두사는 보류돼야 함: {first}");
+        assert_eq!(g.push("_call> <function=list_dir>"), "");
+        assert_eq!(g.finish(), "", "차단 후 꼬리 방출 금지");
+
+        // 마커가 아닌 '<' 는 finish 에서 방출된다
+        let mut g = MarkupStreamGuard::default();
+        let out = g.push("a < b 입니다");
+        let tail = g.finish();
+        assert_eq!(format!("{out}{tail}"), "a < b 입니다");
+        // finish 후 재사용 가능 (다음 완성)
+        assert_eq!(g.push("다음 답변"), "다음 답변");
+    }
+
+    /// 합성 실패 노트는 도구 오류 속 모델용 지시문을 인용하지 않는다
+    /// (2026-06-12 기획자 테스트: "...— 이 사실을 그대로 사용자에게 알리세요"가 노출)
+    #[test]
+    fn failure_note_strips_model_directives() {
+        let msgs = vec![ChatMessage::tool(
+            "c1",
+            "오류: 이 파일은 PDF가 아니라 이미지(.gif)입니다. 이미지 속 글자를 읽는 기능(OCR)은 \
+             없습니다 — 이 사실을 그대로 사용자에게 알리세요.",
+        )];
+        let note = synthesize_failure_note(&msgs, false).unwrap();
+        assert!(note.contains("OCR"), "{note}");
+        assert!(!note.contains("알리세요"), "지시문 노출: {note}");
+        assert!(!note.contains("이 사실을"), "지시문 노출: {note}");
     }
 
     /// 본문 전체가 도구 마크업이면 빈 완성으로 취급해 재시도 경로를 태운다
