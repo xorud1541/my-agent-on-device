@@ -63,6 +63,20 @@ export interface ModelEntry {
   size_bytes: number;
 }
 
+// 백엔드 workspace_summary::WorkspaceSummary 와 1:1 대응
+export interface WorkspaceSummary {
+  workspace_dir: string;
+  folder_name: string;
+  is_default_home: boolean;
+  is_empty: boolean;
+  images: number;
+  pdfs: number;
+  zips: number;
+  others: number;
+  removebg_available: boolean;
+  suggestions: string[];
+}
+
 export interface AppConfig {
   server_exe: string;
   model_path: string;
