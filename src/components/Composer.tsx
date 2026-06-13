@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { FormEvent, KeyboardEvent, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 
 interface Attachment {
   path: string;
@@ -11,6 +11,9 @@ interface Props {
   disabled: boolean;
   onSend: (text: string, attachments: Attachment[]) => void;
   onCancel: () => void;
+  /** 제안 칩 클릭 시 입력창에 채울 텍스트. 채운 뒤 onPrefillConsumed 로 비운다. */
+  prefill?: string;
+  onPrefillConsumed?: () => void;
 }
 
 /** 영역 선택 프레임 아이콘 — 모서리 브래킷 + 중앙 점 (앱 톤에 맞춘 미니멀 스트로크) */
@@ -36,12 +39,25 @@ function CaptureIcon() {
   );
 }
 
-export function Composer({ busy, disabled, onSend, onCancel }: Props) {
+export function Composer({ busy, disabled, onSend, onCancel, prefill, onPrefillConsumed }: Props) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // 제안 클릭 → 입력창 채우기(자동 실행 안 함). 사용자가 보고 Enter.
+  useEffect(() => {
+    if (!prefill) return;
+    setText(prefill);
+    const ta = taRef.current;
+    if (ta) {
+      ta.focus();
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 180)}px`;
+    }
+    onPrefillConsumed?.();
+  }, [prefill, onPrefillConsumed]);
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !busy && !disabled;
 
