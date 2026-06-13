@@ -56,17 +56,18 @@ fn region_capture_helper() -> Result<std::path::PathBuf, String> {
 }
 
 /// UI 주도 영역 캡처: 앱 숨김 → 자체 네이티브 오버레이 헬퍼(별도 프로세스)가 화면에 음영을
-/// 깔고 드래그 선택 → 선택 영역만 캐시에 저장 → 앱 복귀. 취소(Esc/우클릭)면 Ok(None).
+/// 깔고 드래그 선택 → 선택 영역만 워크스페이스(captures/)에 저장 → 앱 복귀. 취소(Esc/우클릭)면 Ok(None).
 /// 헬퍼는 webview 가 아닌 순수 네이티브 창 + 별도 프로세스라 본 앱과 크래시가 격리된다.
 #[tauri::command]
 pub async fn capture_region(app: AppHandle) -> Result<Option<CaptureResult>, String> {
-    let cache_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("앱 캐시 경로 조회 실패: {e}"))?
-        .join("captures");
-    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("캐시 폴더 생성 실패: {e}"))?;
-    let out = cache_dir.join(format!(
+    // 캡처 원본을 워크스페이스 아래 captures/ 에 저장한다 (기존 screen_capture 도구와 동일 관례).
+    let captures_dir = {
+        let state = app.state::<AppState>();
+        let cfg = state.config.lock().unwrap();
+        cfg.workspace_path().join("captures")
+    };
+    std::fs::create_dir_all(&captures_dir).map_err(|e| format!("captures 폴더 생성 실패: {e}"))?;
+    let out = captures_dir.join(format!(
         "capture_{}.png",
         chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
     ));
