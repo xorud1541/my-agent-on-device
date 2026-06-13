@@ -58,6 +58,7 @@ pub fn run() {
             commands::list_sessions,
             commands::load_session,
             commands::delete_session,
+            commands::workspace_summary,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

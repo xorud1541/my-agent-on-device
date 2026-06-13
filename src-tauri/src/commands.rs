@@ -274,6 +274,21 @@ pub fn cancel_turn(state: State<'_, AppState>, session_id: String) {
     }
 }
 
+/// 빈 화면 디스커버빌리티용 — 현재 워크스페이스를 1-depth 스캔한 요약 + 결정적 제안.
+/// 읽기 전용이라 워크스페이스 가드 불필요. 모델 미사용·결정적.
+#[tauri::command]
+pub fn workspace_summary(
+    state: State<'_, AppState>,
+) -> crate::workspace_summary::WorkspaceSummary {
+    let cfg = state.config.lock().unwrap();
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    crate::workspace_summary::summarize(
+        &cfg.workspace_path(),
+        &home,
+        std::path::Path::new(&cfg.removebg_model),
+    )
+}
+
 /// 사용자 발화 처리. 백그라운드 태스크로 에이전트 루프를 돌리고 즉시 반환한다.
 #[tauri::command]
 pub async fn send_message(
