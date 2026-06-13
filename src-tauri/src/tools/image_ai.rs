@@ -113,7 +113,8 @@ impl Tool for RemoveBackground {
     fn description(&self) -> &'static str {
         // '배경제거(누끼)' 복합명사를 명시해야 2B 모델이 도구를 매칭한다 (2026-06-11 replay 검증)
         "배경제거(누끼따기) 전용 도구. 이미지의 배경을 제거해 투명 배경 PNG 로 저장한다. \
-         output_path 생략 시 원본 옆에 _nobg.png 로 저장."
+         output_path 생략 시 워크스페이스에 _nobg.png 로 저장(첨부 이미지처럼 입력이 워크스페이스 \
+         밖이어도 결과는 워크스페이스로 저장됨)."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -146,7 +147,12 @@ impl Tool for RemoveBackground {
             None => {
                 let p = Path::new(input);
                 let stem = p.file_stem().context("잘못된 경로")?.to_string_lossy();
-                p.with_file_name(format!("{stem}_nobg.png"))
+                // 입력이 워크스페이스 밖(캐시 캡처 등)이면 산출물을 워크스페이스로 떨군다.
+                crate::tools::workspace::default_output_in_workspace(
+                    p,
+                    &format!("{stem}_nobg.png"),
+                    &ctx.workspace(),
+                )
             }
         };
         let out_ext = output
@@ -298,19 +304,26 @@ mod tests {
         assert!(err.to_string().contains("지원하지 않는 입력"), "{err}");
     }
 
+    /// 캐시 등 워크스페이스 밖 입력 + output 생략 → 산출물이 워크스페이스로 라우팅되어
+    /// '워크스페이스 밖' 거부가 더 이상 발생하지 않는다 (2026-06-13: 캡처 캐시 배경제거 실패 회귀 방지).
     #[test]
-    fn output_outside_workspace_rejected() {
+    fn outside_input_defaults_into_workspace_not_rejected() {
+        if model_available() {
+            return; // 모델이 있으면 실제 저장까지 진행 — 여기선 경로 거부 여부만 검증
+        }
         let dir = tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
         let ctx = ctx_with_workspace(&ws);
-        let input = dir.path().join("in.png");
+        let input = dir.path().join("in.png"); // 워크스페이스 밖(캐시 흉내)
         image::DynamicImage::new_rgb8(8, 8).save(&input).unwrap();
-        // output_path 생략 → 원본 옆(_nobg.png) = 워크스페이스 밖 → 거부
         let err = RemoveBackground
             .execute(&json!({"path": input.to_string_lossy()}), &ctx)
             .unwrap_err();
-        assert!(err.to_string().contains("워크스페이스 밖"), "{err}");
+        assert!(
+            !err.to_string().contains("워크스페이스 밖"),
+            "캐시 입력의 기본 산출물이 워크스페이스 밖으로 거부됨: {err}"
+        );
     }
 
     /// 실제 모델 E2E — removeBG.ort 가 있을 때만 (alian 방식)
@@ -342,5 +355,33 @@ mod tests {
         let result = image::open(&output).unwrap();
         assert_eq!((result.width(), result.height()), (96, 72));
         assert!(matches!(result, image::DynamicImage::ImageRgba8(_)));
+    }
+
+    /// 실제 시나리오 E2E — 캐시(워크스페이스 밖) 캡처 입력 + output 생략 →
+    /// 산출물이 워크스페이스 안에 _nobg.png 로 생성된다 (2026-06-13 사용자 보고 수정 검증).
+    #[test]
+    fn end_to_end_cache_input_saves_into_workspace() {
+        if !model_available() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let cache = dir.path().join("cache"); // 워크스페이스 밖(앱 캐시 흉내)
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        let ctx = ctx_with_workspace(&ws);
+        let input = cache.join("capture_x.png");
+        let img: image::RgbImage = image::ImageBuffer::from_fn(64, 48, |x, _| {
+            if x > 20 { image::Rgb([200, 30, 30]) } else { image::Rgb([250, 250, 250]) }
+        });
+        img.save(&input).unwrap();
+
+        let out = RemoveBackground
+            .execute(&json!({"path": input.to_string_lossy()}), &ctx)
+            .unwrap();
+        // 산출물이 워크스페이스 안 _nobg.png
+        let expected = ws.join("capture_x_nobg.png");
+        assert!(expected.exists(), "워크스페이스에 산출물 없음. 결과: {out}");
+        assert!(out.contains(&expected.to_string_lossy().to_string()), "{out}");
     }
 }
