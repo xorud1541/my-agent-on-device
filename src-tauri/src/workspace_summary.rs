@@ -9,13 +9,15 @@ pub struct WorkspaceSummary {
     pub workspace_dir: String,
     pub folder_name: String,
     pub is_default_home: bool,
+    /// 에이전트가 다룰 수 있는 파일(이미지/PDF/zip)이 0인가.
+    /// 다른 타입(.docx, .mp4 등)만 있는 폴더도 의도적으로 true — 처리할 도구가 없어 폴더 선택으로 안내한다.
     pub is_empty: bool,
     pub images: u32,
     pub pdfs: u32,
     pub zips: u32,
     pub others: u32,
     pub removebg_available: bool,
-    /// 상태 ①(폴더 지정 + 파일 있음)에서만 채운다. ②/①' 에서는 빈 목록.
+    /// 폴더가 지정됐고 다룰 파일이 있을 때만 채운다. 홈 폴더이거나 다룰 파일이 없으면 빈 목록.
     pub suggestions: Vec<String>,
 }
 
@@ -32,11 +34,11 @@ fn classify(dir: &Path) -> Counts {
     let mut c = Counts::default();
     let Ok(entries) = std::fs::read_dir(dir) else { return c };
     for entry in entries.flatten() {
-        if !entry.path().is_file() {
+        let path = entry.path();
+        if !path.is_file() {
             continue;
         }
-        let ext = entry
-            .path()
+        let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
@@ -66,6 +68,7 @@ fn build_suggestions(c: &Counts, removebg_available: bool) -> Vec<String> {
     if c.zips >= 1 {
         s.push("압축 파일 풀기".to_string());
     }
+    // 화면 캡처는 폴더 내용과 무관하게 항상 가능 — 보유 타입과 별개로 항상 제안한다.
     s.push("화면 캡처해줘".to_string());
     s
 }
