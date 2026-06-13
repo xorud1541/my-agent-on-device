@@ -1,16 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { Composer } from "./components/Composer";
 import { MessageView } from "./components/MessageView";
 import { SessionsSidebar } from "./components/SessionsSidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { useAgent } from "./hooks/useAgent";
-
-const SUGGESTIONS = [
-  "다운로드 폴더에서 PDF 파일 찾아줘",
-  "지금 화면 캡처해줘",
-  "워크스페이스의 사진 배경을 제거해줘",
-  "워크스페이스 이미지들을 PDF 한 권으로 묶어줘",
-];
 
 /** 경로 마지막 폴더명 (헤더 칩 표시용) */
 function lastSegment(p: string) {
@@ -19,10 +13,11 @@ function lastSegment(p: string) {
 }
 
 function App() {
-  const { messages, busy, server, config, send, cancel, newChat, loadSession, sessionId } =
+  const { messages, busy, server, config, summary, send, cancel, newChat, loadSession, sessionId } =
     useAgent();
   const [showSettings, setShowSettings] = useState(false);
   const [showSessions, setShowSessions] = useState(true);
+  const [draft, setDraft] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // 새 콘텐츠가 생기면 맨 아래로
@@ -30,6 +25,14 @@ function App() {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  const pickWorkspace = async () => {
+    if (!config) return;
+    const dir = await invoke<string | null>("pick_folder", {
+      initialDir: config.workspace_dir || null,
+    });
+    if (dir) await invoke("set_config", { newConfig: { ...config, workspace_dir: dir } });
+  };
 
   const statusLabel =
     server.status === "ready"
@@ -94,22 +97,55 @@ function App() {
                 <br />
                 <em>AGENT</em>
               </div>
-              <p className="empty-sub">
-                이 PC 안에서만 동작하는 에이전트입니다. 파일 검색·정리, 이미지 처리, PDF 읽기, 화면
-                캡처를 말로 시키세요.
-              </p>
-              <div className="suggestions">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s}
-                    className="suggestion"
-                    onClick={() => send(s)}
-                    disabled={server.status !== "ready"}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
+
+              {summary && !summary.is_default_home && !summary.is_empty ? (
+                // 상태 ① — 폴더 + 다룰 파일 있음: 요약 + 맞춤 제안
+                <>
+                  <p className="empty-sub">
+                    📁 {summary.folder_name} 폴더에{" "}
+                    {[
+                      summary.images && `🖼 이미지 ${summary.images}`,
+                      summary.pdfs && `📄 PDF ${summary.pdfs}`,
+                      summary.zips && `🗜 zip ${summary.zips}`,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </p>
+                  <div className="suggestions">
+                    {summary.suggestions.map((s) => (
+                      <button
+                        key={s}
+                        className="suggestion"
+                        onClick={() => setDraft(s)}
+                        disabled={server.status !== "ready"}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                // 상태 ② / ①' — 홈/첫 실행 또는 다룰 파일 없는 폴더: 폴더 선택 유도
+                <>
+                  <p className="empty-sub">
+                    {summary && !summary.is_default_home && summary.is_empty
+                      ? "이 폴더에는 처리할 수 있는 파일이 없어요. 다른 폴더를 고르거나 화면을 캡처해 보세요."
+                      : "사진 배경 제거·정리, 이미지→PDF, 화면 캡처 같은 일을 이 PC 안에서만 도와드려요. 먼저 작업할 폴더를 골라주세요."}
+                  </p>
+                  <div className="suggestions">
+                    <button className="suggestion" onClick={pickWorkspace}>
+                      📁 작업할 폴더 선택
+                    </button>
+                    <button
+                      className="suggestion"
+                      onClick={() => setDraft("화면 캡처해줘")}
+                      disabled={server.status !== "ready"}
+                    >
+                      화면 캡처해줘
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             messages.map((m, i) => <MessageView key={i} msg={m} />)
@@ -122,6 +158,8 @@ function App() {
             disabled={server.status !== "ready"}
             onSend={send}
             onCancel={cancel}
+            prefill={draft}
+            onPrefillConsumed={() => setDraft(undefined)}
           />
         </div>
       </div>
