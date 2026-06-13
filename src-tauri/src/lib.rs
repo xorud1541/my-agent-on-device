@@ -6,6 +6,7 @@ pub mod logging;
 pub mod models;
 pub mod sessions;
 pub mod tools;
+pub mod workspace_summary;
 
 use config::AppConfig;
 use llm::server::LlamaServer;
