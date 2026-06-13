@@ -47,6 +47,7 @@ export function Composer({ busy, disabled, onSend, onCancel, prefill, onPrefillC
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // 제안 클릭 → 입력창 채우기(자동 실행 안 함). 사용자가 보고 Enter.
+  // prefill 값 변화에만 반응한다(무관한 리렌더로 재발화하지 않도록 deps 는 prefill 만).
   useEffect(() => {
     if (!prefill) return;
     setText(prefill);
@@ -57,7 +58,7 @@ export function Composer({ busy, disabled, onSend, onCancel, prefill, onPrefillC
       ta.style.height = `${Math.min(ta.scrollHeight, 180)}px`;
     }
     onPrefillConsumed?.();
-  }, [prefill, onPrefillConsumed]);
+  }, [prefill]);
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !busy && !disabled;
 
