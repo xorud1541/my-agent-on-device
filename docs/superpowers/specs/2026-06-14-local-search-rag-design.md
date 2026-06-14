@@ -223,7 +223,10 @@ pub async fn run_turn(/* ...기존... */, rag: Option<String>) -> Result<()> {
 
 1. `SearchClient` 사이드카 래퍼 설계 — 기동·`/api/status`·`/api/search`를 우리
    `llm/server.rs` 패턴(+ macOS/Windows 분기)에 맞춰 구체화.
-2. `index_folder` 도구(폴더 인덱싱) 설계 — 등록·진행률 이벤트.
+2. ~~`index_folder` 도구(폴더 인덱싱)~~ → **변경(2026-06-14)**: 채팅 도구 방식 폐기.
+   대신 앱 시작 시 **워크스페이스(사용자 지정 폴더)의 문서를 자동 인덱싱**한다
+   (`start_localsearch_inner` 가 serve 전에 `run_index(workspace)` 수행, 홈 전체는 가드로 제외).
+   향후: 워크스페이스 변경 시 재인덱싱, 변경 감지(watcher), 증분 인덱싱.
 3. RAG 프리훅 §5 구현 + "복원/저장 정합성" 단위 테스트.
 4. 일반대화 페르소나 §6 시스템 프롬프트 반영.
 5. 모델/바이너리 배포 경로 — fetch-deps 패처 확장.

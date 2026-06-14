@@ -285,6 +285,20 @@ fn cfg_or_env(field: &str, env_key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// 워크스페이스를 자동 인덱싱해도 되는지. 디렉토리가 아니거나 홈 전체면 막는다
+/// (홈은 워크스페이스 미설정 시의 폴백 — 통째로 인덱싱하면 너무 광범위·위험).
+pub fn is_indexable_workspace(ws: &std::path::Path) -> bool {
+    if !ws.is_dir() {
+        return false;
+    }
+    if let Some(home) = dirs::home_dir() {
+        if ws == home {
+            return false;
+        }
+    }
+    true
+}
+
 /// 색인 DB 영속 위치 (워크스페이스와 무관하게 유지).
 fn default_index_db_dir() -> PathBuf {
     dirs::data_dir()
@@ -524,6 +538,20 @@ mod tests {
     }
 
     use crate::config::AppConfig;
+
+    #[test]
+    fn workspace_not_indexable_when_home_or_missing() {
+        // 워크스페이스 미설정 시 홈으로 폴백하는데, 홈 전체 인덱싱은 막아야 한다.
+        let home = dirs::home_dir().unwrap();
+        assert!(!is_indexable_workspace(&home));
+        assert!(!is_indexable_workspace(std::path::Path::new("/없는경로/진짜없음")));
+    }
+
+    #[test]
+    fn workspace_indexable_when_real_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_indexable_workspace(tmp.path()));
+    }
 
     #[test]
     fn from_app_is_none_when_disabled() {

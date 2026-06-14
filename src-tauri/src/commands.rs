@@ -123,13 +123,31 @@ pub async fn restart_server(app: AppHandle) -> Result<(), String> {
 }
 
 /// 로컬 검색 사이드카 기동 (앱 시작 시). 미구성/바이너리 없음이면 조용히 비활성한다.
+/// 워크스페이스(사용자 지정 폴더)의 문서를 인덱싱한 뒤 사이드카(serve)를 띄운다.
 /// 실패해도 앱 동작에는 지장 없으므로 에러를 전파하지 않는다(검색만 비활성).
 pub async fn start_localsearch_inner(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let cfg = state.config.lock().unwrap().clone();
+    let (cfg, workspace) = {
+        let c = state.config.lock().unwrap();
+        (c.clone(), c.workspace_path())
+    };
     let Some(lc) = crate::localsearch::LocalSearchConfig::from_app(&cfg) else {
         return; // 로컬 검색 미구성 → 검색 없이 동작
     };
+
+    // 1) 워크스페이스 문서 인덱싱 — serve 전에 수행해 같은 DB 동시 접근을 피한다.
+    //    (홈 전체 등 광범위 폴더는 가드로 건너뜀)
+    if crate::localsearch::is_indexable_workspace(&workspace) {
+        let lc2 = lc.clone();
+        let ws = workspace.to_string_lossy().into_owned();
+        match tokio::task::spawn_blocking(move || crate::localsearch::run_index(&lc2, &ws)).await {
+            Ok(Ok(s)) => eprintln!("[localsearch] 워크스페이스 인덱싱: {s:?}"),
+            Ok(Err(e)) => eprintln!("[localsearch] 워크스페이스 인덱싱 실패: {e:#}"),
+            Err(e) => eprintln!("[localsearch] 인덱싱 태스크 조인 실패: {e}"),
+        }
+    }
+
+    // 2) 사이드카(serve) 기동 → 검색 클라이언트 보관
     let mut server = state.localsearch.lock().await;
     match server.start(&lc).await {
         Ok(client) => {
