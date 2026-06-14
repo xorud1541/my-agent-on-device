@@ -292,6 +292,32 @@ body::before {
   padding-left: 2px;
 }
 
+/* ── RAG 출처 (말풍선 하단) ─────────────────────────────── */
+.msg-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+.msg-sources-label {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.source-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  background: var(--amber-soft, rgba(180, 140, 40, 0.12));
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+  border-radius: 999px;
+  padding: 1px 9px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── thinking 블록 ──────────────────────────────────────── */
 .think {
   border-left: 2px solid var(--amber);

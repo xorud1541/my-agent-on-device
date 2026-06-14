@@ -280,8 +280,15 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
             }
             None => None,
         };
-        if let (Some(block), Some(sys0)) = (&rag, messages.first_mut()) {
-            sys0.content = Some(format!("{}\n\n{}", sys_backup.as_deref().unwrap_or(""), block));
+        if let Some(rc) = &rag {
+            // 출처를 UI 로 방송 (말풍선 하단 표시)
+            emit(AgentEvent::Sources {
+                session_id: sid.clone(),
+                sources: rc.sources.clone(),
+            });
+            if let Some(sys0) = messages.first_mut() {
+                sys0.content = Some(format!("{}\n\n{}", sys_backup.as_deref().unwrap_or(""), rc.block));
+            }
         }
 
         let pre_len = messages.len() - 1; // 이번 턴 user 메시지부터 로그에 포함

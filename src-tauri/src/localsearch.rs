@@ -131,7 +131,7 @@ impl SearchClient {
     /// RAG 프리훅: 색인이 있으면 질의를 검색해 근거 블록을 만든다.
     /// None = 색인 없음 / 검색 실패 / 관련 문서 없음(임계값 미달) → 일반대화로 흘러감.
     /// 어떤 실패도 패닉/에러 전파 없이 None 으로 떨어진다(대화 경로는 항상 진행).
-    pub async fn rag_context(&self, query: &str, top_k: u32, min_cosine: f32) -> Option<String> {
+    pub async fn rag_context(&self, query: &str, top_k: u32, min_cosine: f32) -> Option<RagContext> {
         if self.indexed_count().await.ok()? == 0 {
             return None;
         }
@@ -148,17 +148,25 @@ pub const RAG_TOP_K: u32 = 3;
 /// (2026-06-14 mac 빌드 실측). 빌드/모델 바뀌면 재보정.
 pub const RAG_MIN_COSINE: f32 = 0.45;
 
-/// 검색 히트에서 RAG 근거 블록을 만든다.
+/// RAG 프리훅 결과: system 에 합칠 근거 블록 + 출처 파일명 목록.
+#[derive(Debug, Clone)]
+pub struct RagContext {
+    pub block: String,
+    /// 근거로 포함된 출처 파일명(중복 제거, 등장 순). UI 말풍선 하단 표시용.
+    pub sources: Vec<String>,
+}
+
+/// 검색 히트에서 RAG 근거를 만든다.
 /// 최상위 히트의 dense_cosine 이 `min_cosine` 미만이거나 히트가 없으면 None
 /// (= 관련 문서 없음 → 일반대화로 흘러감). 임계값을 넘는 청크만 포함한다.
-pub fn build_rag_context(hits: &[Hit], min_cosine: f32) -> Option<String> {
+pub fn build_rag_context(hits: &[Hit], min_cosine: f32) -> Option<RagContext> {
     let top = hits.first()?;
     if top.dense_cosine < min_cosine {
         return None;
     }
-    let body = hits
+    let included: Vec<&Hit> = hits.iter().filter(|h| h.dense_cosine >= min_cosine).collect();
+    let body = included
         .iter()
-        .filter(|h| h.dense_cosine >= min_cosine)
         .enumerate()
         .map(|(i, h)| {
             format!(
@@ -172,10 +180,20 @@ pub fn build_rag_context(hits: &[Hit], min_cosine: f32) -> Option<String> {
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    Some(format!(
-        "{RAG_MARKER}\n{body}\n\n[지시] 위 문서가 사용자 질문과 의미상 관련될 때만 근거로 쓰고, \
-         무관하면 완전히 무시한다. 문서에 없는 내용은 지어내지 말고 모른다고 답한다."
-    ))
+
+    let mut sources: Vec<String> = Vec::new();
+    for h in &included {
+        if !sources.contains(&h.filename) {
+            sources.push(h.filename.clone());
+        }
+    }
+
+    let block = format!(
+        "{RAG_MARKER}\n{body}\n\n[지시] 위 참고 문서가 사용자 질문과 관련되면, \
+         도구를 호출하지 말고 문서 내용으로 바로 한국어로 답한다. 무관하면 무시한다. \
+         문서에 없는 내용은 지어내지 말고 모른다고 답한다."
+    );
+    Some(RagContext { block, sources })
 }
 
 /// `localsearch-cli` 의 index 인자 배열. 인덱싱은 HTTP serve 가 아니라 별도 서브프로세스로
@@ -714,8 +732,9 @@ mod tests {
 
         let ctx = client.rag_context("연차 며칠", 3, 0.45).await.unwrap();
 
-        assert!(ctx.contains(RAG_MARKER));
-        assert!(ctx.contains("hr.md"));
+        assert!(ctx.block.contains(RAG_MARKER));
+        assert!(ctx.block.contains("hr.md"));
+        assert_eq!(ctx.sources, vec!["hr.md".to_string()]);
     }
 
     #[test]
@@ -727,9 +746,10 @@ mod tests {
 
         let ctx = build_rag_context(&hits, 0.45).unwrap();
 
-        assert!(ctx.contains(RAG_MARKER));
-        assert!(ctx.contains("hr.md"));
-        assert!(ctx.contains("연차는 15일"));
-        assert!(!ctx.contains("net.md")); // 임계값 미달 청크는 제외
+        assert!(ctx.block.contains(RAG_MARKER));
+        assert!(ctx.block.contains("hr.md"));
+        assert!(ctx.block.contains("연차는 15일"));
+        assert!(!ctx.block.contains("net.md")); // 임계값 미달 청크는 제외
+        assert_eq!(ctx.sources, vec!["hr.md".to_string()]); // net.md 는 출처에서도 제외
     }
 }

@@ -6,6 +6,7 @@ export type AgentEvent =
   | { type: "tool-call-end"; session_id: string; call_id: string; name: string; ok: boolean; result: string }
   | { type: "turn-end"; session_id: string; elapsed_ms: number }
   | { type: "error"; session_id: string; message: string }
+  | { type: "sources"; session_id: string; sources: string[] }
   | { type: "server-status"; status: "loading" | "ready" | "down"; detail: string }
   | { type: "config-changed"; config: AppConfig };
 
@@ -33,6 +34,8 @@ export interface AssistantMessage {
   segments: Segment[];
   /** 진행 중이면 undefined, 끝나면 소요 ms */
   elapsedMs?: number;
+  /** RAG 근거로 사용된 출처 문서 파일명 (말풍선 하단 표시) */
+  sources?: string[];
 }
 
 export type UiMessage = UserMessage | AssistantMessage;
@@ -75,6 +78,12 @@ export interface AppConfig {
   user_name: string;
   agent_name: string;
   removebg_model: string;
+  localsearch_enabled: boolean;
+  localsearch_bin: string;
+  localsearch_models_dir: string;
+  localsearch_db_dir: string;
+  localsearch_port: number;
+  ort_dylib: string;
 }
 
 export type ServerStatus = { status: "loading" | "ready" | "down"; detail: string };

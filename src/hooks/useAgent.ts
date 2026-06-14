@@ -99,6 +99,9 @@ export function useAgent() {
             segments: [...m.segments, { kind: "error", message: ev.message }],
           }));
           break;
+        case "sources":
+          patchAssistant((m) => ({ ...m, sources: ev.sources }));
+          break;
         case "turn-end":
           patchAssistant((m) => ({
             ...m,
