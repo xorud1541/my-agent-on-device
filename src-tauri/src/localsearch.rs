@@ -173,6 +173,104 @@ pub fn build_rag_context(hits: &[Hit], min_cosine: f32) -> Option<String> {
     ))
 }
 
+/// `localsearch-cli` 의 index 인자 배열. 인덱싱은 HTTP serve 가 아니라 별도 서브프로세스로
+/// 수행한다(serve 에는 index 라우트가 없다). 같은 db_dir 를 공유한다.
+pub fn index_args(cfg: &LocalSearchConfig, path: &str) -> Vec<String> {
+    vec![
+        "--models-dir".into(),
+        cfg.models_dir.to_string_lossy().into_owned(),
+        "--db-dir".into(),
+        cfg.db_dir.to_string_lossy().into_owned(),
+        "index".into(),
+        path.into(),
+    ]
+}
+
+/// index 서브프로세스 결과 요약.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSummary {
+    pub indexed: u64,
+    pub skipped: u64,
+    pub errors: u64,
+}
+
+/// 마커 직후의 첫 정수를 파싱한다 (앞쪽 비숫자는 건너뛴다).
+fn first_uint_after(s: &str, marker: &str) -> Option<u64> {
+    let rest = s.split(marker).nth(1)?;
+    let digits: String = rest
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// `index` 의 표준출력에서 "인덱싱 완료: N chunks, skipped=A, errors=B" 줄을 파싱한다.
+pub fn parse_index_summary(stdout: &str) -> Option<IndexSummary> {
+    let line = stdout.lines().rev().find(|l| l.contains("인덱싱 완료:"))?;
+    Some(IndexSummary {
+        indexed: first_uint_after(line, "완료:")?,
+        skipped: first_uint_after(line, "skipped=")?,
+        errors: first_uint_after(line, "errors=")?,
+    })
+}
+
+/// `localsearch-cli index <path>` 를 동기로 실행하고 요약을 파싱한다 (블로킹).
+pub fn run_index(cfg: &LocalSearchConfig, path: &str) -> Result<IndexSummary> {
+    use anyhow::{bail, Context};
+    if !cfg.binary.exists() {
+        bail!("localsearch-cli 실행 파일이 없습니다: {}", cfg.binary.display());
+    }
+    let mut cmd = std::process::Command::new(&cfg.binary);
+    cmd.args(index_args(cfg, path));
+    if let Some(dylib) = &cfg.ort_dylib {
+        cmd.env("ORT_DYLIB_PATH", dylib);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output().context("localsearch-cli index 실행 실패")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_index_summary(&stdout).with_context(|| {
+        format!(
+            "인덱싱 결과를 해석하지 못했습니다. stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+impl LocalSearchConfig {
+    /// 환경변수 + 기본 위치로 사이드카 설정을 해석한다.
+    /// TODO(task3): config.rs(AppConfig) 정식 필드로 대체. 지금은 미구성 시 None.
+    pub fn resolve_from_env() -> Option<Self> {
+        let binary = PathBuf::from(std::env::var("LOCALSEARCH_CLI_BIN").ok()?);
+        if !binary.exists() {
+            return None;
+        }
+        let models_dir = PathBuf::from(std::env::var("LOCALSEARCH_MODELS_DIR").ok()?);
+        let db_dir = default_index_db_dir();
+        std::fs::create_dir_all(&db_dir).ok();
+        Some(Self {
+            binary,
+            models_dir,
+            db_dir,
+            ort_dylib: std::env::var("ORT_DYLIB_PATH").ok().map(PathBuf::from),
+            port: 11434,
+        })
+    }
+}
+
+/// 색인 DB 영속 위치 (워크스페이스와 무관하게 유지).
+fn default_index_db_dir() -> PathBuf {
+    dirs::data_dir()
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("local-agent")
+        .join("localsearch")
+}
+
 /// LocalSearch 사이드카 프로세스 관리자 (llm::server::LlamaServer 패턴).
 pub struct LocalSearchServer {
     child: Option<tokio::process::Child>,
@@ -377,6 +475,63 @@ mod tests {
         let count = client.indexed_count().await.expect("status 응답 실패");
         eprintln!("[e2e] indexed_count = {count}");
         server.stop().await;
+    }
+
+    /// 실제 바이너리로 폴더를 인덱싱하는 e2e (기본 무시). 환경변수는 사이드카 e2e 와 동일.
+    #[test]
+    #[ignore]
+    fn e2e_run_index_indexes_a_folder() {
+        let bin = std::env::var("LOCALSEARCH_CLI_BIN").expect("LOCALSEARCH_CLI_BIN 필요");
+        let models = std::env::var("LOCALSEARCH_MODELS_DIR").expect("LOCALSEARCH_MODELS_DIR 필요");
+        let docs = std::env::temp_dir().join("ls_e2e_index_docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "# 휴가\n\n연차는 입사 1년 후 15일이다.").unwrap();
+
+        let cfg = LocalSearchConfig {
+            binary: bin.into(),
+            models_dir: models.into(),
+            db_dir: std::env::temp_dir().join("ls_e2e_index_db"),
+            ort_dylib: std::env::var("ORT_DYLIB_PATH").ok().map(Into::into),
+            port: 11238,
+        };
+
+        let s = run_index(&cfg, &docs.to_string_lossy()).expect("인덱싱 실패");
+        eprintln!("[e2e] {s:?}");
+        assert!(s.indexed >= 1);
+    }
+
+    #[test]
+    fn index_args_places_index_subcommand_with_path() {
+        let cfg = LocalSearchConfig {
+            binary: "/v/ls".into(),
+            models_dir: "/m".into(),
+            db_dir: "/d".into(),
+            ort_dylib: None,
+            port: 11234,
+        };
+
+        let args = index_args(&cfg, "/docs/folder");
+
+        assert_eq!(
+            args,
+            vec!["--models-dir", "/m", "--db-dir", "/d", "index", "/docs/folder"]
+        );
+    }
+
+    #[test]
+    fn parse_index_summary_extracts_counts() {
+        let out = "  [ok] a.md → 1 chunks\n인덱싱 완료: 5 chunks, skipped=2, errors=1\n";
+
+        let s = parse_index_summary(out).unwrap();
+
+        assert_eq!(s.indexed, 5);
+        assert_eq!(s.skipped, 2);
+        assert_eq!(s.errors, 1);
+    }
+
+    #[test]
+    fn parse_index_summary_is_none_without_summary_line() {
+        assert!(parse_index_summary("진행 로그만 있고 완료줄 없음").is_none());
     }
 
     #[test]

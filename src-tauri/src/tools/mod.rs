@@ -2,6 +2,7 @@ mod archive;
 mod capture;
 mod fs_tools;
 mod image_ai;
+mod index;
 mod image_tools;
 mod pdf_make;
 mod pdf_tools;
@@ -89,6 +90,7 @@ impl ToolRegistry {
                 Box::new(fs_tools::CopyPath),
                 Box::new(fs_tools::DeletePath),
                 Box::new(search::SearchFiles),
+                Box::new(index::IndexFolder),
                 Box::new(image_tools::ImageInfo),
                 Box::new(image_tools::ImageTransform),
                 Box::new(image_ai::RemoveBackground),
