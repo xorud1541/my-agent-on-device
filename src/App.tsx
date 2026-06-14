@@ -24,7 +24,7 @@ function introBubble(summary: import("./types").WorkspaceSummary | null): string
   const captureNote = "화면을 첨부하려면 입력창 왼쪽의 캡처 버튼을 눌러 영역을 드래그하세요.";
   // 상태 ② — 홈/첫 실행/요약 로딩 전(null)
   if (!summary || summary.is_default_home) {
-    return `안녕하세요! 사진 배경 제거·정리, 이미지를 PDF로 합치기 같은 일을 이 PC 안에서만 도와드려요.\n\n먼저 작업할 폴더를 골라주세요. ${captureNote}`;
+    return `안녕하세요! 사진 배경 제거·정리, 이미지를 PDF로 합치기 같은 일을 이 PC 안에서만 도와드려요.\n\n먼저 작업할 폴더를 골라주세요.\n\n${captureNote}`;
   }
   // 상태 ①' — 폴더 지정 + 다룰 파일 없음
   if (summary.is_empty) {

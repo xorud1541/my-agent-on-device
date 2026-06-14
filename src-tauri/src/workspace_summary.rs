@@ -17,9 +17,6 @@ pub struct WorkspaceSummary {
     pub zips: u32,
     pub others: u32,
     pub removebg_available: bool,
-    /// 폴더의 대표(알파벳 최소) 이미지/PDF 파일명 — 제안에 실제 파일명을 쓰기 위해.
-    pub sample_image: Option<String>,
-    pub sample_pdf: Option<String>,
     /// 폴더가 지정됐고 다룰 파일이 있을 때만 채운다. 홈 폴더이거나 다룰 파일이 없으면 빈 목록.
     pub suggestions: Vec<String>,
 }
@@ -119,8 +116,6 @@ pub fn summarize(workspace_dir: &Path, home_dir: &Path, removebg_model: &Path) -
         zips: c.zips,
         others: c.others,
         removebg_available,
-        sample_image: c.sample_image.clone(),
-        sample_pdf: c.sample_pdf.clone(),
         suggestions,
     }
 }
@@ -146,7 +141,6 @@ mod tests {
         touch(ws.path(), "a.png");
         let s = summarize(ws.path(), home.path(), &model_path);
         assert_eq!(s.images, 2);
-        assert_eq!(s.sample_image.as_deref(), Some("a.png")); // 알파벳 최소
         assert!(!s.is_empty);
         assert!(s.removebg_available);
         assert_eq!(
@@ -164,7 +158,6 @@ mod tests {
         let home = tempdir().unwrap();
         touch(ws.path(), "report.pdf");
         let s = summarize(ws.path(), home.path(), Path::new("/none.ort"));
-        assert_eq!(s.sample_pdf.as_deref(), Some("report.pdf"));
         assert_eq!(s.suggestions, vec!["report.pdf 텍스트 추출".to_string()]);
     }
 
