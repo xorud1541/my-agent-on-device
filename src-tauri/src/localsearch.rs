@@ -142,6 +142,11 @@ impl SearchClient {
 
 /// 시스템 프롬프트에 합쳐지는 RAG 근거 블록의 시작 표지.
 pub const RAG_MARKER: &str = "[참고 문서]";
+/// RAG 검색 시 가져올 청크 수.
+pub const RAG_TOP_K: u32 = 3;
+/// RAG 관련성 게이트(dense_cosine). 작은 RRF score 가 아니라 의미 유사도로 거른다
+/// (2026-06-14 mac 빌드 실측). 빌드/모델 바뀌면 재보정.
+pub const RAG_MIN_COSINE: f32 = 0.45;
 
 /// 검색 히트에서 RAG 근거 블록을 만든다.
 /// 최상위 히트의 dense_cosine 이 `min_cosine` 미만이거나 히트가 없으면 None
@@ -242,24 +247,42 @@ pub fn run_index(cfg: &LocalSearchConfig, path: &str) -> Result<IndexSummary> {
 }
 
 impl LocalSearchConfig {
-    /// 환경변수 + 기본 위치로 사이드카 설정을 해석한다.
-    /// TODO(task3): config.rs(AppConfig) 정식 필드로 대체. 지금은 미구성 시 None.
-    pub fn resolve_from_env() -> Option<Self> {
-        let binary = PathBuf::from(std::env::var("LOCALSEARCH_CLI_BIN").ok()?);
+    /// AppConfig 에서 사이드카 설정을 해석한다. 빈 필드는 환경변수로 폴백한다.
+    /// None = 비활성 / 바이너리·모델 미설정 → 로컬 검색 끔(graceful).
+    pub fn from_app(cfg: &crate::config::AppConfig) -> Option<Self> {
+        if !cfg.localsearch_enabled {
+            return None;
+        }
+        let binary = cfg_or_env(&cfg.localsearch_bin, "LOCALSEARCH_CLI_BIN")?;
         if !binary.exists() {
             return None;
         }
-        let models_dir = PathBuf::from(std::env::var("LOCALSEARCH_MODELS_DIR").ok()?);
-        let db_dir = default_index_db_dir();
+        let models_dir = cfg_or_env(&cfg.localsearch_models_dir, "LOCALSEARCH_MODELS_DIR")?;
+        let db_dir = if cfg.localsearch_db_dir.trim().is_empty() {
+            default_index_db_dir()
+        } else {
+            PathBuf::from(&cfg.localsearch_db_dir)
+        };
         std::fs::create_dir_all(&db_dir).ok();
         Some(Self {
             binary,
             models_dir,
             db_dir,
-            ort_dylib: std::env::var("ORT_DYLIB_PATH").ok().map(PathBuf::from),
-            port: 11434,
+            ort_dylib: cfg_or_env(&cfg.ort_dylib, "ORT_DYLIB_PATH"),
+            port: cfg.localsearch_port,
         })
     }
+}
+
+/// config 필드가 비어있지 않으면 그 값을, 비어있으면 환경변수를 PathBuf 로 돌려준다.
+fn cfg_or_env(field: &str, env_key: &str) -> Option<PathBuf> {
+    if !field.trim().is_empty() {
+        return Some(PathBuf::from(field));
+    }
+    std::env::var(env_key)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 /// 색인 DB 영속 위치 (워크스페이스와 무관하게 유지).
@@ -498,6 +521,40 @@ mod tests {
         let s = run_index(&cfg, &docs.to_string_lossy()).expect("인덱싱 실패");
         eprintln!("[e2e] {s:?}");
         assert!(s.indexed >= 1);
+    }
+
+    use crate::config::AppConfig;
+
+    #[test]
+    fn from_app_is_none_when_disabled() {
+        let cfg = AppConfig {
+            localsearch_enabled: false,
+            ..AppConfig::default()
+        };
+        assert!(LocalSearchConfig::from_app(&cfg).is_none());
+    }
+
+    #[test]
+    fn from_app_prefers_config_fields() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let bin = tmp.path().to_string_lossy().into_owned();
+        let cfg = AppConfig {
+            localsearch_enabled: true,
+            localsearch_bin: bin.clone(),
+            localsearch_models_dir: "/m".into(),
+            localsearch_db_dir: std::env::temp_dir()
+                .join("ls_cfg_db")
+                .to_string_lossy()
+                .into_owned(),
+            localsearch_port: 12000,
+            ..AppConfig::default()
+        };
+
+        let lc = LocalSearchConfig::from_app(&cfg).unwrap();
+
+        assert_eq!(lc.binary.to_string_lossy(), bin);
+        assert_eq!(lc.models_dir, PathBuf::from("/m"));
+        assert_eq!(lc.port, 12000);
     }
 
     #[test]

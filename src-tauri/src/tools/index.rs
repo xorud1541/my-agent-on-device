@@ -46,7 +46,11 @@ impl Tool for IndexFolder {
             ));
         }
 
-        let cfg = LocalSearchConfig::resolve_from_env().ok_or_else(|| {
+        let cfg = {
+            let app = ctx.config.lock().unwrap();
+            LocalSearchConfig::from_app(&app)
+        }
+        .ok_or_else(|| {
             anyhow!(
                 "로컬 검색이 아직 구성되지 않았습니다 (검색 엔진 경로 미설정). \
                  이 사실을 사용자에게 그대로 알리세요."

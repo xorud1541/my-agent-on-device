@@ -10,6 +10,7 @@ pub mod tools;
 
 use config::AppConfig;
 use llm::server::LlamaServer;
+use localsearch::{LocalSearchServer, SearchClient};
 use models::ChatMessage;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -21,6 +22,10 @@ pub struct AppState {
     /// Arc — 도구 실행 컨텍스트(ToolCtx)와 살아있는 설정을 공유한다
     pub config: Arc<Mutex<AppConfig>>,
     pub server: tokio::sync::Mutex<LlamaServer>,
+    /// 로컬 검색 사이드카(localsearch-cli serve) 관리자
+    pub localsearch: tokio::sync::Mutex<LocalSearchServer>,
+    /// 사이드카가 준비되면 채워지는 검색 클라이언트 (RAG 프리훅이 사용). None = 비활성
+    pub search: tokio::sync::Mutex<Option<SearchClient>>,
     pub sessions: Mutex<HashMap<String, Vec<ChatMessage>>>,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub registry: Arc<ToolRegistry>,
@@ -32,6 +37,8 @@ pub fn run() {
         .manage(AppState {
             config: Arc::new(Mutex::new(AppConfig::load())),
             server: tokio::sync::Mutex::new(LlamaServer::new()),
+            localsearch: tokio::sync::Mutex::new(LocalSearchServer::new()),
+            search: tokio::sync::Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             registry: Arc::new(ToolRegistry::with_default_tools()),
@@ -41,6 +48,11 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = commands::start_server_inner(&handle).await;
+            });
+            // 로컬 검색 사이드카도 함께 기동 (미구성/바이너리 없음이면 조용히 건너뜀)
+            let ls_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::start_localsearch_inner(&ls_handle).await;
             });
             Ok(())
         })
@@ -66,6 +78,9 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 if let Ok(mut server) = state.server.try_lock() {
                     tauri::async_runtime::block_on(server.stop());
+                };
+                if let Ok(mut ls) = state.localsearch.try_lock() {
+                    tauri::async_runtime::block_on(ls.stop());
                 };
             }
         });

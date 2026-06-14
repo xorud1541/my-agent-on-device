@@ -122,6 +122,25 @@ pub async fn restart_server(app: AppHandle) -> Result<(), String> {
     start_server_inner(&app).await
 }
 
+/// 로컬 검색 사이드카 기동 (앱 시작 시). 미구성/바이너리 없음이면 조용히 비활성한다.
+/// 실패해도 앱 동작에는 지장 없으므로 에러를 전파하지 않는다(검색만 비활성).
+pub async fn start_localsearch_inner(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock().unwrap().clone();
+    let Some(lc) = crate::localsearch::LocalSearchConfig::from_app(&cfg) else {
+        return; // 로컬 검색 미구성 → 검색 없이 동작
+    };
+    let mut server = state.localsearch.lock().await;
+    match server.start(&lc).await {
+        Ok(client) => {
+            *state.search.lock().await = Some(client);
+        }
+        Err(e) => {
+            eprintln!("localsearch 사이드카 기동 실패(검색 비활성): {e:#}");
+        }
+    }
+}
+
 #[tauri::command]
 pub fn new_session(state: State<'_, AppState>) -> String {
     let id = uuid::Uuid::new_v4().to_string();
@@ -183,7 +202,7 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
         let history = sessions
             .get_mut(&session_id)
             .ok_or_else(|| format!("세션 없음: {session_id}"))?;
-        history.push(ChatMessage::user(text));
+        history.push(ChatMessage::user(text.clone()));
         history.clone()
     };
     {
@@ -232,6 +251,21 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
             Arc::new(move |ev| emit_event(&notify_app, ev)),
         );
 
+        // RAG 프리훅: 색인이 있으면 발화를 검색해 근거 블록을 system(messages[0]) 에 합친다.
+        // 이번 턴 LLM 호출에만 쓰고 세션에는 저장하지 않으므로, run_turn 뒤 원복한다.
+        let sys_backup = messages.first().and_then(|m| m.content.clone());
+        let rag = match app2.state::<AppState>().search.lock().await.clone() {
+            Some(client) => {
+                client
+                    .rag_context(&text, crate::localsearch::RAG_TOP_K, crate::localsearch::RAG_MIN_COSINE)
+                    .await
+            }
+            None => None,
+        };
+        if let (Some(block), Some(sys0)) = (&rag, messages.first_mut()) {
+            sys0.content = Some(format!("{}\n\n{}", sys_backup.as_deref().unwrap_or(""), block));
+        }
+
         let pre_len = messages.len() - 1; // 이번 턴 user 메시지부터 로그에 포함
         let started = std::time::Instant::now();
         let run = agent::run_turn(
@@ -239,6 +273,13 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
             &emit,
         )
         .await;
+
+        // RAG 근거 블록 원복 — 저장/세션에 스테일 컨텍스트가 남지 않도록
+        if rag.is_some() {
+            if let Some(sys0) = messages.first_mut() {
+                sys0.content = sys_backup;
+            }
+        }
 
         let mut all_errors: Vec<String> = turn_errors.lock().unwrap().clone();
         if let Err(e) = run.as_ref() {
