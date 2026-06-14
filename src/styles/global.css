@@ -209,7 +209,8 @@ body::before {
 
 /* 빈 상태 */
 .empty-state {
-  margin: auto;
+  align-self: center;
+  margin-top: 32px;
   text-align: center;
   display: flex;
   flex-direction: column;
@@ -293,11 +294,11 @@ body::before {
 }
 
 .intro-bubble {
-  margin-top: 4px;
-  align-items: flex-start;
+  align-self: flex-start;
+  max-width: 80%;
   text-align: left;
-  max-width: 460px;
-  width: 100%;
+  align-items: flex-start;
+  margin-top: 4px;
 }
 .intro-bubble .suggestion {
   align-self: flex-start;

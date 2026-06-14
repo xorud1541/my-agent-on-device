@@ -120,16 +120,18 @@ function App() {
           <div className="chat-scroll" ref={scrollRef}>
             <div className="chat-inner">
           {messages.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-mark">
-                LOCAL
-                <br />
-                <em>AGENT</em>
+            <>
+              <div className="empty-state">
+                <div className="empty-mark">
+                  LOCAL
+                  <br />
+                  <em>AGENT</em>
+                </div>
+                <p className="empty-sub">
+                  이 PC 안에서만 동작하는 에이전트입니다. 파일 검색·정리, 이미지 처리, PDF 읽기, 화면
+                  캡처를 말로 시키세요.
+                </p>
               </div>
-              <p className="empty-sub">
-                이 PC 안에서만 동작하는 에이전트입니다. 파일 검색·정리, 이미지 처리, PDF 읽기, 화면
-                캡처를 말로 시키세요.
-              </p>
               <div className="msg-assistant intro-bubble">
                 <div className="prose">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{introBubble(summary)}</ReactMarkdown>
@@ -140,7 +142,7 @@ function App() {
                   </button>
                 )}
               </div>
-            </div>
+            </>
           ) : (
             messages.map((m, i) => <MessageView key={i} msg={m} />)
           )}
