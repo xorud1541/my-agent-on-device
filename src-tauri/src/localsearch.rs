@@ -144,9 +144,11 @@ impl SearchClient {
 pub const RAG_MARKER: &str = "[참고 문서]";
 /// RAG 검색 시 가져올 청크 수.
 pub const RAG_TOP_K: u32 = 3;
-/// RAG 관련성 게이트(dense_cosine). 작은 RRF score 가 아니라 의미 유사도로 거른다
-/// (2026-06-14 mac 빌드 실측). 빌드/모델 바뀌면 재보정.
-pub const RAG_MIN_COSINE: f32 = 0.45;
+/// RAG 관련성 게이트(dense_cosine). 작은 RRF score 가 아니라 의미 유사도로 거른다.
+/// 실측 보정(2026-06-14): 잡담("하이?/안녕/고마워")은 cos 0.43~0.46, 내용 질문은 0.56~0.59 로
+/// 군집이 갈린다. 0.45 는 잡담 대역이라 인사에도 오발동 → 두 군집 사이 0.52 로 올림.
+/// (경계 질문은 일반대화로 빠질 수 있으나 인사 오발동보다 낫다.) 빌드/모델 바뀌면 재보정.
+pub const RAG_MIN_COSINE: f32 = 0.52;
 
 /// RAG 프리훅 결과: system 에 합칠 근거 블록 + 출처 파일명 목록.
 #[derive(Debug, Clone)]
