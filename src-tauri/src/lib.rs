@@ -2,6 +2,7 @@ pub mod agent;
 mod commands;
 pub mod config;
 pub mod llm;
+pub mod localsearch;
 pub mod logging;
 pub mod models;
 pub mod sessions;
