@@ -74,6 +74,8 @@ export interface WorkspaceSummary {
   zips: number;
   others: number;
   removebg_available: boolean;
+  sample_image: string | null;
+  sample_pdf: string | null;
   suggestions: string[];
 }
 

@@ -21,15 +21,16 @@ function escapeMd(s: string): string {
 
 /** 빈 화면에 띄울 합성 어시스턴트 말풍선 텍스트(마크다운). 결정적 — 모델 호출 없음. */
 function introBubble(summary: import("./types").WorkspaceSummary | null): string {
+  const captureNote = "화면을 첨부하려면 입력창 왼쪽의 캡처 버튼을 눌러 영역을 드래그하세요.";
   // 상태 ② — 홈/첫 실행/요약 로딩 전(null)
   if (!summary || summary.is_default_home) {
-    return "안녕하세요! 사진 배경 제거·정리, 이미지를 PDF로 묶기, 화면 캡처 같은 일을 이 PC 안에서만 도와드려요.\n\n먼저 작업할 폴더를 골라주세요.";
+    return `안녕하세요! 사진 배경 제거·정리, 이미지를 PDF로 합치기 같은 일을 이 PC 안에서만 도와드려요.\n\n먼저 작업할 폴더를 골라주세요. ${captureNote}`;
   }
   // 상태 ①' — 폴더 지정 + 다룰 파일 없음
   if (summary.is_empty) {
-    return `📁 **${escapeMd(summary.folder_name)}** 폴더에는 아직 다룰 수 있는 파일(이미지·PDF·zip)이 없어요.\n\n다른 폴더를 고르거나, "화면 캡처해줘"라고 말해보세요.`;
+    return `📁 **${escapeMd(summary.folder_name)}** 폴더에는 아직 다룰 수 있는 파일(이미지·PDF·zip)이 없어요.\n\n다른 폴더를 고르거나, ${captureNote}`;
   }
-  // 상태 ① — 폴더 + 파일 있음: 요약 + 예시 발화
+  // 상태 ① — 폴더 + 파일 있음: 요약 + 예시 발화 + 캡처 버튼 안내
   const counts = [
     summary.images && `이미지 ${summary.images}장`,
     summary.pdfs && `PDF ${summary.pdfs}개`,
@@ -38,7 +39,7 @@ function introBubble(summary: import("./types").WorkspaceSummary | null): string
     .filter(Boolean)
     .join(", ");
   const examples = summary.suggestions.map((s) => `- "${s}"`).join("\n");
-  return `📁 **${escapeMd(summary.folder_name)}** 폴더에 ${counts}가 있어요.\n\n예를 들어 이렇게 말해보세요:\n\n${examples}`;
+  return `📁 **${escapeMd(summary.folder_name)}** 폴더에 ${counts}가 있어요.\n\n예를 들어 이렇게 말해보세요:\n\n${examples}\n\n${captureNote}`;
 }
 
 function App() {
