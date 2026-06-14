@@ -8,6 +8,11 @@ export type AgentEvent =
   | { type: "error"; session_id: string; message: string }
   | { type: "sources"; session_id: string; sources: string[] }
   | { type: "server-status"; status: "loading" | "ready" | "down"; detail: string }
+  | {
+      type: "localsearch-status";
+      status: "indexing" | "ready" | "disabled" | "error";
+      detail: string;
+    }
   | { type: "config-changed"; config: AppConfig };
 
 // 어시스턴트 턴은 발생 순서대로 쌓이는 세그먼트의 나열이다
@@ -87,3 +92,7 @@ export interface AppConfig {
 }
 
 export type ServerStatus = { status: "loading" | "ready" | "down"; detail: string };
+export type LocalsearchStatus = {
+  status: "indexing" | "ready" | "disabled" | "error";
+  detail: string;
+};

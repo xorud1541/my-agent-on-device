@@ -114,6 +114,11 @@ pub enum AgentEvent {
         status: String,
         detail: String,
     },
+    /// 로컬 검색 인덱싱/사이드카 상태 (indexing | ready | disabled | error)
+    LocalsearchStatus {
+        status: String,
+        detail: String,
+    },
     /// 설정 변경 방송 (워크스페이스/페르소나 등). UI ↔ 에이전트 루프 실시간 동기화용 —
     /// 설정 패널 저장이든 도구(set_workspace) 호출이든 같은 이벤트가 흐른다.
     ConfigChanged {

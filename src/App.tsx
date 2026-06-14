@@ -19,7 +19,7 @@ function lastSegment(p: string) {
 }
 
 function App() {
-  const { messages, busy, server, config, send, cancel, newChat, loadSession, sessionId } =
+  const { messages, busy, server, localsearch, config, send, cancel, newChat, loadSession, sessionId } =
     useAgent();
   const [showSettings, setShowSettings] = useState(false);
   const [showSessions, setShowSessions] = useState(true);
@@ -79,6 +79,13 @@ function App() {
           </button>
         </div>
       </header>
+
+      {localsearch.status === "indexing" && (
+        <div className="ls-banner" title="문서를 색인하는 동안에도 일반 대화·파일 작업은 가능합니다">
+          <span className="ls-spinner" />
+          문서 색인 중{localsearch.detail ? ` · ${localsearch.detail}` : ""} — 검색 기반 답변은 잠시 후 가능해요
+        </div>
+      )}
 
       <div className="body">
         {showSessions && (

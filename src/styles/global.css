@@ -292,6 +292,32 @@ body::before {
   padding-left: 2px;
 }
 
+/* ── 로컬 검색 인덱싱 배너 ──────────────────────────────── */
+.ls-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  background: var(--amber-soft, rgba(180, 140, 40, 0.12));
+  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+}
+.ls-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--ink-faint);
+  border-top-color: transparent;
+  animation: ls-spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes ls-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ── RAG 출처 (말풍선 하단) ─────────────────────────────── */
 .msg-sources {
   display: flex;

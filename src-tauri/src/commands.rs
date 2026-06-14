@@ -127,17 +127,29 @@ pub async fn restart_server(app: AppHandle) -> Result<(), String> {
 /// 실패해도 앱 동작에는 지장 없으므로 에러를 전파하지 않는다(검색만 비활성).
 pub async fn start_localsearch_inner(app: &AppHandle) {
     let state = app.state::<AppState>();
+    // 상태를 AppState 에 기록하고 동시에 UI 로 방송한다 (콜드 스타트 레이스는 마운트 조회로 보완)
+    let set_status = |st: &str, detail: String| {
+        *state.localsearch_status.lock().unwrap() = (st.to_string(), detail.clone());
+        emit_event(app, AgentEvent::LocalsearchStatus { status: st.into(), detail });
+    };
+
     let (cfg, workspace) = {
         let c = state.config.lock().unwrap();
         (c.clone(), c.workspace_path())
     };
     let Some(lc) = crate::localsearch::LocalSearchConfig::from_app(&cfg) else {
-        return; // 로컬 검색 미구성 → 검색 없이 동작
+        set_status("disabled", String::new()); // 로컬 검색 미구성 → 검색 없이 동작
+        return;
     };
 
     // 1) 워크스페이스 문서 인덱싱 — serve 전에 수행해 같은 DB 동시 접근을 피한다.
     //    (홈 전체 등 광범위 폴더는 가드로 건너뜀)
     if crate::localsearch::is_indexable_workspace(&workspace) {
+        let ws_name = workspace
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        set_status("indexing", ws_name);
         let lc2 = lc.clone();
         let ws = workspace.to_string_lossy().into_owned();
         match tokio::task::spawn_blocking(move || crate::localsearch::run_index(&lc2, &ws)).await {
@@ -151,12 +163,21 @@ pub async fn start_localsearch_inner(app: &AppHandle) {
     let mut server = state.localsearch.lock().await;
     match server.start(&lc).await {
         Ok(client) => {
+            let count = client.indexed_count().await.unwrap_or(0);
             *state.search.lock().await = Some(client);
+            set_status("ready", format!("{count}개 문서"));
         }
         Err(e) => {
             eprintln!("localsearch 사이드카 기동 실패(검색 비활성): {e:#}");
+            set_status("error", format!("{e}"));
         }
     }
+}
+
+/// 현재 로컬 검색 상태 조회 (프론트 마운트 시 인덱싱 배너 레이스 보완용).
+#[tauri::command]
+pub fn get_localsearch_status(state: State<'_, AppState>) -> (String, String) {
+    state.localsearch_status.lock().unwrap().clone()
 }
 
 #[tauri::command]

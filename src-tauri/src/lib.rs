@@ -26,6 +26,9 @@ pub struct AppState {
     pub localsearch: tokio::sync::Mutex<LocalSearchServer>,
     /// 사이드카가 준비되면 채워지는 검색 클라이언트 (RAG 프리훅이 사용). None = 비활성
     pub search: tokio::sync::Mutex<Option<SearchClient>>,
+    /// 로컬 검색 인덱싱/사이드카 상태 (status, detail). 콜드 스타트 시 프론트가 마운트 후
+    /// 조회해 인덱싱 배너 레이스를 피한다.
+    pub localsearch_status: Mutex<(String, String)>,
     pub sessions: Mutex<HashMap<String, Vec<ChatMessage>>>,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub registry: Arc<ToolRegistry>,
@@ -39,6 +42,7 @@ pub fn run() {
             server: tokio::sync::Mutex::new(LlamaServer::new()),
             localsearch: tokio::sync::Mutex::new(LocalSearchServer::new()),
             search: tokio::sync::Mutex::new(None),
+            localsearch_status: Mutex::new(("disabled".into(), String::new())),
             sessions: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             registry: Arc::new(ToolRegistry::with_default_tools()),
@@ -61,6 +65,7 @@ pub fn run() {
             commands::set_config,
             commands::list_models,
             commands::server_status,
+            commands::get_localsearch_status,
             commands::restart_server,
             commands::new_session,
             commands::send_message,
