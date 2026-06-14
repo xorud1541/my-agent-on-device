@@ -292,6 +292,14 @@ body::before {
   padding-left: 2px;
 }
 
+.intro-bubble {
+  margin-top: 8px;
+  align-items: flex-start;
+}
+.intro-bubble .suggestion {
+  align-self: flex-start;
+}
+
 /* ── thinking 블록 ──────────────────────────────────────── */
 .think {
   border-left: 2px solid var(--amber);

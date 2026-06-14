@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Composer } from "./components/Composer";
 import { MessageView } from "./components/MessageView";
 import { SessionsSidebar } from "./components/SessionsSidebar";
@@ -12,12 +14,33 @@ function lastSegment(p: string) {
   return parts[parts.length - 1] ?? p;
 }
 
+/** 빈 화면에 띄울 합성 어시스턴트 말풍선 텍스트(마크다운). 결정적 — 모델 호출 없음. */
+function introBubble(summary: import("./types").WorkspaceSummary | null): string {
+  // 상태 ② — 홈/첫 실행/요약 로딩 전(null)
+  if (!summary || summary.is_default_home) {
+    return "안녕하세요! 사진 배경 제거·정리, 이미지를 PDF로 묶기, 화면 캡처 같은 일을 이 PC 안에서만 도와드려요.\n\n먼저 작업할 폴더를 골라주세요.";
+  }
+  // 상태 ①' — 폴더 지정 + 다룰 파일 없음
+  if (summary.is_empty) {
+    return `📁 **${summary.folder_name}** 폴더에는 아직 다룰 수 있는 파일(이미지·PDF·zip)이 없어요.\n\n다른 폴더를 고르거나, "화면 캡처해줘"라고 말해보세요.`;
+  }
+  // 상태 ① — 폴더 + 파일 있음: 요약 + 예시 발화
+  const counts = [
+    summary.images && `이미지 ${summary.images}장`,
+    summary.pdfs && `PDF ${summary.pdfs}개`,
+    summary.zips && `zip ${summary.zips}개`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const examples = summary.suggestions.map((s) => `- "${s}"`).join("\n");
+  return `📁 **${summary.folder_name}** 폴더에 ${counts}가 있어요.\n\n예를 들어 이렇게 말해보세요:\n\n${examples}`;
+}
+
 function App() {
   const { messages, busy, server, config, summary, send, cancel, newChat, loadSession, sessionId } =
     useAgent();
   const [showSettings, setShowSettings] = useState(false);
   const [showSessions, setShowSessions] = useState(true);
-  const [draft, setDraft] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // 새 콘텐츠가 생기면 맨 아래로
@@ -91,60 +114,14 @@ function App() {
           <div className="chat-scroll" ref={scrollRef}>
             <div className="chat-inner">
           {messages.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-mark">
-                LOCAL
-                <br />
-                <em>AGENT</em>
+            <div className="msg-assistant intro-bubble">
+              <div className="prose">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{introBubble(summary)}</ReactMarkdown>
               </div>
-
-              {summary && !summary.is_default_home && !summary.is_empty ? (
-                // 상태 ① — 폴더 + 다룰 파일 있음: 요약 + 맞춤 제안
-                <>
-                  <p className="empty-sub">
-                    📁 {summary.folder_name} 폴더에{" "}
-                    {[
-                      summary.images && `🖼 이미지 ${summary.images}`,
-                      summary.pdfs && `📄 PDF ${summary.pdfs}`,
-                      summary.zips && `🗜 zip ${summary.zips}`,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </p>
-                  <div className="suggestions">
-                    {summary.suggestions.map((s) => (
-                      <button
-                        key={s}
-                        className="suggestion"
-                        onClick={() => setDraft(s)}
-                        disabled={server.status !== "ready"}
-                      >
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                // 상태 ② / ①' — 홈/첫 실행 또는 다룰 파일 없는 폴더: 폴더 선택 유도
-                <>
-                  <p className="empty-sub">
-                    {summary && !summary.is_default_home && summary.is_empty
-                      ? "이 폴더에는 처리할 수 있는 파일이 없어요. 다른 폴더를 고르거나 화면을 캡처해 보세요."
-                      : "사진 배경 제거·정리, 이미지→PDF, 화면 캡처 같은 일을 이 PC 안에서만 도와드려요. 먼저 작업할 폴더를 골라주세요."}
-                  </p>
-                  <div className="suggestions">
-                    <button className="suggestion" onClick={pickWorkspace}>
-                      📁 작업할 폴더 선택
-                    </button>
-                    <button
-                      className="suggestion"
-                      onClick={() => setDraft("화면 캡처해줘")}
-                      disabled={server.status !== "ready"}
-                    >
-                      화면 캡처해줘
-                    </button>
-                  </div>
-                </>
+              {(!summary || summary.is_default_home || summary.is_empty) && (
+                <button className="suggestion" onClick={pickWorkspace}>
+                  📁 작업할 폴더 선택
+                </button>
               )}
             </div>
           ) : (
@@ -158,8 +135,6 @@ function App() {
             disabled={server.status !== "ready"}
             onSend={send}
             onCancel={cancel}
-            prefill={draft}
-            onPrefillConsumed={() => setDraft(undefined)}
           />
         </div>
       </div>
