@@ -24,7 +24,7 @@ function introBubble(summary: import("./types").WorkspaceSummary | null): string
   const captureNote = "화면을 첨부하려면 입력창 왼쪽의 캡처 버튼을 눌러 영역을 드래그하세요.";
   // 상태 ② — 홈/첫 실행/요약 로딩 전(null)
   if (!summary || summary.is_default_home) {
-    return `안녕하세요! 사진 배경 제거·정리, 이미지를 PDF로 합치기 같은 일을 이 PC 안에서만 도와드려요.\n\n먼저 작업할 폴더를 골라주세요.\n\n${captureNote}`;
+    return `작업할 폴더를 고르면 그 안에서 할 수 있는 일을 알려드릴게요.\n\n${captureNote}`;
   }
   // 상태 ①' — 폴더 지정 + 다룰 파일 없음
   if (summary.is_empty) {
@@ -120,15 +120,26 @@ function App() {
           <div className="chat-scroll" ref={scrollRef}>
             <div className="chat-inner">
           {messages.length === 0 ? (
-            <div className="msg-assistant intro-bubble">
-              <div className="prose">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{introBubble(summary)}</ReactMarkdown>
+            <div className="empty-state">
+              <div className="empty-mark">
+                LOCAL
+                <br />
+                <em>AGENT</em>
               </div>
-              {(!summary || summary.is_default_home || summary.is_empty) && (
-                <button className="suggestion" onClick={pickWorkspace}>
-                  📁 작업할 폴더 선택
-                </button>
-              )}
+              <p className="empty-sub">
+                이 PC 안에서만 동작하는 에이전트입니다. 파일 검색·정리, 이미지 처리, PDF 읽기, 화면
+                캡처를 말로 시키세요.
+              </p>
+              <div className="msg-assistant intro-bubble">
+                <div className="prose">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{introBubble(summary)}</ReactMarkdown>
+                </div>
+                {(!summary || summary.is_default_home || summary.is_empty) && (
+                  <button className="suggestion" onClick={pickWorkspace}>
+                    📁 작업할 폴더 선택
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             messages.map((m, i) => <MessageView key={i} msg={m} />)

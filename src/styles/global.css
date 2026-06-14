@@ -293,8 +293,11 @@ body::before {
 }
 
 .intro-bubble {
-  margin-top: 8px;
+  margin-top: 4px;
   align-items: flex-start;
+  text-align: left;
+  max-width: 460px;
+  width: 100%;
 }
 .intro-bubble .suggestion {
   align-self: flex-start;
