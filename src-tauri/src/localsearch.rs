@@ -9,6 +9,36 @@
 
 use anyhow::Result;
 use serde::Deserialize;
+use std::path::PathBuf;
+
+/// LocalSearch 사이드카 기동 설정. config.rs 와 분리해 모듈을 자족적으로 유지한다
+/// (호출부에서 AppConfig 로부터 채워 넣음).
+#[derive(Debug, Clone)]
+pub struct LocalSearchConfig {
+    /// localsearch-cli 실행 파일 경로 (플랫폼별: win `.exe` / mac Mach-O)
+    pub binary: PathBuf,
+    /// harrier-v1-270m-onnx 의 부모 디렉토리
+    pub models_dir: PathBuf,
+    /// 색인 DB 디렉토리 (text.db 자동 생성)
+    pub db_dir: PathBuf,
+    /// libonnxruntime 동적 라이브러리 경로 → ORT_DYLIB_PATH 로 전달 (없으면 시스템 탐색)
+    pub ort_dylib: Option<PathBuf>,
+    pub port: u16,
+}
+
+/// `localsearch-cli` 의 serve 인자 배열. clap 글로벌 인자(--models-dir/--db-dir)를
+/// 서브커맨드(serve) 앞에 둔다.
+pub fn serve_args(cfg: &LocalSearchConfig) -> Vec<String> {
+    vec![
+        "--models-dir".into(),
+        cfg.models_dir.to_string_lossy().into_owned(),
+        "--db-dir".into(),
+        cfg.db_dir.to_string_lossy().into_owned(),
+        "serve".into(),
+        "--port".into(),
+        cfg.port.to_string(),
+    ]
+}
 
 /// /api/search 결과 한 건. 사이드카는 더 많은 필드를 보내지만 RAG 에 쓰는 것만 받는다
 /// (serde 는 미선언 필드를 무시한다).
@@ -143,6 +173,86 @@ pub fn build_rag_context(hits: &[Hit], min_cosine: f32) -> Option<String> {
     ))
 }
 
+/// LocalSearch 사이드카 프로세스 관리자 (llm::server::LlamaServer 패턴).
+pub struct LocalSearchServer {
+    child: Option<tokio::process::Child>,
+    base_url: String,
+}
+
+impl Default for LocalSearchServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LocalSearchServer {
+    pub fn new() -> Self {
+        Self {
+            child: None,
+            base_url: String::new(),
+        }
+    }
+
+    /// `localsearch-cli serve` 를 띄우고 /api/status 가 응답할 때까지 대기한다
+    /// (Harrier 모델 로드 포함). 준비되면 사이드카를 가리키는 SearchClient 를 돌려준다.
+    pub async fn start(&mut self, cfg: &LocalSearchConfig) -> anyhow::Result<SearchClient> {
+        use anyhow::{bail, Context};
+        use std::time::Duration;
+
+        self.stop().await;
+        if !cfg.binary.exists() {
+            bail!("localsearch-cli 실행 파일이 없습니다: {}", cfg.binary.display());
+        }
+
+        let mut cmd = tokio::process::Command::new(&cfg.binary);
+        cmd.args(serve_args(cfg));
+        // ort load-dynamic 이 dlopen 할 onnxruntime 경로 (mac: Homebrew dylib 등)
+        if let Some(dylib) = &cfg.ort_dylib {
+            cmd.env("ORT_DYLIB_PATH", dylib);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        // 사이드카 출력은 로그 파일로 (문제 추적용)
+        let log_path = crate::logging::log_dir().join("localsearch-server.log");
+        if let Ok(log) = std::fs::File::create(&log_path) {
+            if let Ok(log2) = log.try_clone() {
+                cmd.stdout(std::process::Stdio::from(log));
+                cmd.stderr(std::process::Stdio::from(log2));
+            }
+        }
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().context("localsearch-cli 실행 실패")?;
+        self.child = Some(child);
+        self.base_url = format!("http://127.0.0.1:{}", cfg.port);
+        let client = SearchClient::new(self.base_url.clone());
+
+        // 준비 대기 (최대 120초) — 모델 로드가 길 수 있다
+        for _ in 0..120 {
+            if let Some(child) = &mut self.child {
+                if let Ok(Some(status)) = child.try_wait() {
+                    bail!("localsearch-cli 가 즉시 종료됨 (exit: {status}). 로그: {}", log_path.display());
+                }
+            }
+            if client.status().await.is_ok() {
+                return Ok(client);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        self.stop().await;
+        bail!("localsearch-cli 가 120초 내에 준비되지 않음")
+    }
+
+    pub async fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill().await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +351,51 @@ mod tests {
         let client = SearchClient::new(format!("http://{addr}"));
 
         assert_eq!(client.indexed_count().await.unwrap(), 0);
+    }
+
+    /// 실제 바이너리로 사이드카를 띄워 status 까지 확인하는 e2e (기본 무시).
+    /// 실행: 아래 환경변수 지정 후
+    ///   LOCALSEARCH_CLI_BIN=<.../localsearch-cli> \
+    ///   LOCALSEARCH_MODELS_DIR=<harrier 부모> \
+    ///   ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib \
+    ///   cargo test --lib localsearch::tests::e2e_sidecar_starts_and_responds -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_sidecar_starts_and_responds() {
+        let bin = std::env::var("LOCALSEARCH_CLI_BIN").expect("LOCALSEARCH_CLI_BIN 필요");
+        let models = std::env::var("LOCALSEARCH_MODELS_DIR").expect("LOCALSEARCH_MODELS_DIR 필요");
+        let cfg = LocalSearchConfig {
+            binary: bin.into(),
+            models_dir: models.into(),
+            db_dir: std::env::temp_dir().join("ls_e2e_db"),
+            ort_dylib: std::env::var("ORT_DYLIB_PATH").ok().map(Into::into),
+            port: 11237,
+        };
+
+        let mut server = LocalSearchServer::new();
+        let client = server.start(&cfg).await.expect("사이드카 기동 실패");
+        let count = client.indexed_count().await.expect("status 응답 실패");
+        eprintln!("[e2e] indexed_count = {count}");
+        server.stop().await;
+    }
+
+    #[test]
+    fn serve_args_orders_global_dirs_before_subcommand() {
+        // clap 글로벌 인자(--models-dir/--db-dir)는 서브커맨드(serve) 앞에 둔다.
+        let cfg = LocalSearchConfig {
+            binary: "/v/localsearch-cli".into(),
+            models_dir: "/m".into(),
+            db_dir: "/d".into(),
+            ort_dylib: Some("/lib/libonnxruntime.dylib".into()),
+            port: 11234,
+        };
+
+        let args = serve_args(&cfg);
+
+        assert_eq!(
+            args,
+            vec!["--models-dir", "/m", "--db-dir", "/d", "serve", "--port", "11234"]
+        );
     }
 
     fn hit(filename: &str, heading: &str, text: &str, score: f32, dense_cosine: f32) -> Hit {
