@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "purpose": "RAG 라우팅(로컬서치 vs 파일도구) 게이트 2x2 절제(±A x ±B) 평가셋",
+    "workspace": "~/.alice/images",
+    "ground_truth_zips": ["a.zip", "all_images.zip", "b.zip", "c.zip"],
+    "known_hallucinations": ["report_2026.pdf", "pngs.zip", "reports.zip", "cat.png"],
+    "scoring": {
+      "observables_per_run": ["rag_fired (Sources 이벤트)", "tools_called[]", "final_answer"],
+      "route_correct": "expected_route=tool → expect_tools 중 하나 호출됨 / =doc → rag_fired && 쓰기도구 미호출",
+      "catastrophic": "expected_route=tool 인데 rag_fired && expect_tools 미호출 (하이재킹)",
+      "recovered_B": "expected_route=tool && rag_fired 였지만 조회도구로 expect_tools 호출 성공 (B 켜졌을 때만 가능)",
+      "answer_grounded": "answer_must_mention 포함 && answer_must_not_mention 미포함"
+    }
+  },
+  "cases": [
+    {"id": "T01", "utterance": "현재 압축파일 뭐있지?", "category": "regression-guard", "expected_route": "tool", "expect_tools": ["list_dir"], "forbid_sources": true, "answer_must_mention": ["a.zip", "b.zip", "c.zip"], "answer_must_not_mention": ["report_2026.pdf", "reports.zip"], "notes": "turn23 원버그. cos 0.585 — A 가 상태조회로 잡아야 함"},
+    {"id": "T02", "utterance": "현재 폴더의 파일리스트는?", "category": "clear-tool", "expect_tools": ["list_dir"], "expected_route": "tool", "forbid_sources": true, "notes": "turn25. cos 0.500"},
+    {"id": "T03", "utterance": "현재폴더에 압축파일이 뭐가 있지?", "category": "regression-guard", "expected_route": "tool", "expect_tools": ["list_dir"], "forbid_sources": true, "answer_must_mention": ["a.zip"], "notes": "turn24. '뭐가 있' 합성조회"},
+    {"id": "T04", "utterance": "현재 폴더에 압축 파일들을 알려줘", "category": "regression-guard", "expected_route": "tool", "expect_tools": ["list_dir"], "forbid_sources": true, "answer_must_mention": ["a.zip"], "notes": "turn26. '알려줘'+파일명사 합성"},
+    {"id": "T05", "utterance": "현재 폴더에 압축파일이 있는가?", "category": "regression-guard", "expected_route": "tool", "expect_tools": ["list_dir"], "forbid_sources": true, "notes": "turn27. '있는가' 존재조회"},
+    {"id": "T06", "utterance": "dog.png 90도 회전해줘", "category": "clear-tool", "expected_route": "tool", "expect_tools": ["image_transform"], "forbid_sources": true, "notes": "쓰기 도구 명령. cos 0.642 (문서보다 높음) — A 가 파일명+동사로 잡아야"},
+    {"id": "T07", "utterance": "woman.png 배경 지워줘", "category": "clear-tool", "expected_route": "tool", "expect_tools": ["remove_background"], "forbid_sources": true, "notes": "배경제거 동사"},
+    {"id": "T08", "utterance": "c.zip 풀어줘", "category": "clear-tool", "expected_route": "tool", "expect_tools": ["zip_extract"], "forbid_sources": true, "notes": "압축해제. 파일명.확장자"},
+    {"id": "T09", "utterance": "a.txt 읽어줘", "category": "clear-tool", "expected_route": "tool", "expect_tools": ["read_file"], "forbid_sources": true, "notes": "읽기 — B 백스톱이 RAG턴에도 살려두는 도구"},
+    {"id": "T10", "utterance": "이미지 파일 몇 개야?", "category": "clear-tool", "expected_route": "tool", "expect_tools": ["list_dir"], "forbid_sources": true, "notes": "개수 조회"},
+
+    {"id": "D01", "utterance": "알캡처 기능 설명해줘", "category": "clear-doc", "expected_route": "doc", "expect_tools": [], "require_sources": true, "answer_must_mention": ["캡처"], "notes": "alcapture 매뉴얼. cos 0.686"},
+    {"id": "D02", "utterance": "알캡처 단축키 알려줘", "category": "clear-doc", "expected_route": "doc", "expect_tools": [], "require_sources": true, "notes": "'알려줘'지만 파일명사 없음 → A 가드. cos 0.678"},
+    {"id": "D03", "utterance": "업무보고서 2분기 계획이 뭐야?", "category": "clear-doc", "expected_route": "doc", "expect_tools": [], "require_sources": true, "notes": "업무보고서_2026Q1. '뭐야'는 상태조회 술어 아님. cos 0.599"},
+    {"id": "D04", "utterance": "앨리스 사용 시나리오 설명해줘", "category": "clear-doc", "expected_route": "doc", "expect_tools": [], "require_sources": true, "notes": "시나리오 문서. cos 0.712"},
+    {"id": "D05", "utterance": "압축은 어떻게 해?", "category": "clear-doc", "expected_route": "doc", "expect_tools": [], "require_sources": true, "notes": "how-to. '압축해/압축하' 아님 → A 미발동. cos 0.635"},
+    {"id": "D06", "utterance": "월간보고서 5월 이슈가 뭐였어?", "category": "clear-doc", "expected_route": "doc", "expect_tools": [], "require_sources": true, "notes": "월간보고서 2부(이슈및리스크)"},
+
+    {"id": "B01", "utterance": "압축 파일 만드는 방법 알려줘", "category": "boundary", "expected_route": "doc", "expect_tools": [], "require_sources": true, "notes": "⚠ 게이트는 도구(파일명사+알려줘)로 봄. 의도는 how-to(문서). A 오판 예상 — B 도 못 구제(문서질문)"},
+    {"id": "B02", "utterance": "pdf로 변환하는 기능 있어?", "category": "boundary", "expected_route": "doc", "expect_tools": [], "require_sources": true, "notes": "⚠ 게이트는 도구(pdf+있어). 의도는 앱 기능 질문(문서/일반). A 오판 예상"},
+    {"id": "B03", "utterance": "캡처한 이미지들 어디 저장돼?", "category": "boundary", "expected_route": "tool", "expect_tools": ["list_dir"], "forbid_sources": false, "notes": "⚠ 게이트는 문서로 봄(술어 없음). 의도는 파일 위치(도구). A 미스 → B 가 구제할 핵심 케이스"},
+    {"id": "B04", "utterance": "압축파일 안에 뭐가 들어있어?", "category": "boundary", "expected_route": "tool", "expect_tools": ["zip_extract", "list_dir"], "forbid_sources": false, "notes": "zip 내부 조회. 게이트는 도구(파일명사+있어)로 봄"},
+    {"id": "B05", "utterance": "알캡처 매뉴얼 pdf 어디 있어?", "category": "boundary", "expected_route": "tool", "expect_tools": ["list_dir", "search_files"], "forbid_sources": false, "notes": "파일 찾기. 게이트는 도구(pdf+있어). '매뉴얼' 토픽과 충돌"},
+
+    {"id": "G01", "utterance": "이미지_집합.pdf 열어줘", "category": "known-gap", "expected_route": "tool", "expect_tools": ["read_file", "pdf_extract_text"], "forbid_sources": false, "notes": "⚠ 한글 파일명 사각지대 — A 의 확장자 감지가 ASCII 영숫자 요구라 못 잡음. B 가 구제할 케이스. cos 0.661"},
+    {"id": "G02", "utterance": "이미지들 전부 pdf로 묶어줘", "category": "known-gap", "expected_route": "tool", "expect_tools": ["images_to_pdf"], "forbid_sources": false, "notes": "⚠ '묶어줘' 동사 A 누락 → 문서로 샘. 쓰기 도구라 B 도 구제 못함(조회만 유지) — A 보강 필요. cos 0.589"}
+  ]
+}
