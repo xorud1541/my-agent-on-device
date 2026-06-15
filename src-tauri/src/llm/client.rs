@@ -63,6 +63,13 @@ pub trait LlmClient: Send + Sync {
         temperature: f32,
         sink: DeltaSink<'_>,
     ) -> Result<CompletionResult>;
+
+    /// 로드된 모델이 이미지를 실제로 볼 수 있는가(mmproj 부착). 에이전트가 "이미지
+    /// 내용 질문" 턴에 파일조작 도구를 숨기고 비전으로 답하게 할지 결정하는 데 쓴다.
+    /// 비전이 없으면 이미지 픽셀이 전송되지 않으므로 그 라우팅을 적용하면 안 된다.
+    fn vision_enabled(&self) -> bool {
+        false
+    }
 }
 
 /// llama-server OpenAI 호환 엔드포인트용 실제 클라이언트.
@@ -109,6 +116,10 @@ const MAX_ATTEMPTS: u32 = 3;
 
 #[async_trait::async_trait]
 impl LlmClient for HttpLlmClient {
+    fn vision_enabled(&self) -> bool {
+        self.vision_enabled
+    }
+
     async fn complete(
         &self,
         messages: &[ChatMessage],
