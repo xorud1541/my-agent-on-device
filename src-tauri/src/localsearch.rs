@@ -319,6 +319,74 @@ pub fn is_indexable_workspace(ws: &std::path::Path) -> bool {
     true
 }
 
+/// 색인 대상 문서 확장자. 이미지/압축 등 임베딩 대상이 아닌 산출물은 제외해,
+/// 이미지 도구가 만든 .png/.zip 이 freshness 를 깨고 불필요한 재색인을 부르지 않게 한다.
+const INDEXABLE_EXTS: &[&str] =
+    &["txt", "pdf", "md", "csv", "doc", "docx", "rtf", "html", "htm", "json"];
+
+/// 워크스페이스 색인 대상 문서의 지문: (문서 수, 최신 수정시각 secs). 임베딩 없이 stat 만 —
+/// 빠르다. 추가(수↑)·삭제(수↓)·수정(mtime↑)을 모두 감지한다.
+pub fn workspace_fingerprint(ws: &std::path::Path) -> (u64, u64) {
+    let mut count = 0u64;
+    let mut newest = 0u64;
+    for entry in walkdir::WalkDir::new(ws).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let is_doc = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| INDEXABLE_EXTS.contains(&e.to_lowercase().as_str()))
+            .unwrap_or(false);
+        if !is_doc {
+            continue;
+        }
+        count += 1;
+        if let Some(secs) = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+        {
+            newest = newest.max(secs);
+        }
+    }
+    (count, newest)
+}
+
+fn fingerprint_file(db_dir: &std::path::Path) -> PathBuf {
+    db_dir.join(".index_fingerprint")
+}
+
+/// 직전 성공 색인 직후의 지문을 저장한다(워크스페이스 경로 + 문서수 + 최신 mtime).
+pub fn save_index_fingerprint(db_dir: &std::path::Path, ws: &std::path::Path) -> std::io::Result<()> {
+    let (count, newest) = workspace_fingerprint(ws);
+    std::fs::create_dir_all(db_dir)?;
+    std::fs::write(
+        fingerprint_file(db_dir),
+        format!("{}\n{count}\n{newest}", ws.display()),
+    )
+}
+
+/// 저장된 지문과 현재 워크스페이스 지문이 일치하면 true → 재색인 스킵 가능.
+/// 지문이 없거나(최초)·워크스페이스가 바뀌었거나·문서가 추가/삭제/수정됐으면 false.
+pub fn is_index_fresh(db_dir: &std::path::Path, ws: &std::path::Path) -> bool {
+    let Ok(stored) = std::fs::read_to_string(fingerprint_file(db_dir)) else {
+        return false;
+    };
+    let mut lines = stored.lines();
+    let saved_ws = lines.next().unwrap_or("");
+    let saved_count: u64 = lines.next().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+    let saved_newest: u64 = lines.next().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+    if saved_ws != ws.display().to_string() {
+        return false;
+    }
+    let (count, newest) = workspace_fingerprint(ws);
+    count == saved_count && newest <= saved_newest
+}
+
 /// 색인 DB 영속 위치 (워크스페이스와 무관하게 유지).
 fn default_index_db_dir() -> PathBuf {
     dirs::data_dir()
@@ -412,6 +480,34 @@ impl LocalSearchServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freshness_gate_skips_only_when_unchanged() {
+        let ws = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("doc1.txt"), "a").unwrap();
+        std::fs::write(ws.path().join("doc2.pdf"), "b").unwrap();
+        // 지문이 없으면 fresh 아님 → 최초 색인 필요
+        assert!(!is_index_fresh(db.path(), ws.path()), "지문 없으면 fresh 아님");
+        // 색인 끝나면 지문 저장 → 변동 없으니 fresh (재색인 스킵)
+        save_index_fingerprint(db.path(), ws.path()).unwrap();
+        assert!(is_index_fresh(db.path(), ws.path()), "변동 없으면 fresh");
+        // 문서 추가 → 지문 깨짐 → 재색인 필요
+        std::fs::write(ws.path().join("doc3.txt"), "c").unwrap();
+        assert!(!is_index_fresh(db.path(), ws.path()), "문서 추가 시 fresh 아님");
+    }
+
+    #[test]
+    fn freshness_ignores_non_document_outputs() {
+        let ws = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("doc.txt"), "a").unwrap();
+        save_index_fingerprint(db.path(), ws.path()).unwrap();
+        // 이미지 도구 산출물(.png)은 색인 대상이 아니므로 freshness 를 깨면 안 된다
+        std::fs::write(ws.path().join("dog_edited.png"), "img").unwrap();
+        std::fs::write(ws.path().join("backup.zip"), "zip").unwrap();
+        assert!(is_index_fresh(db.path(), ws.path()), "비문서 산출물은 재색인 트리거 금지");
+    }
 
     #[test]
     fn parses_hits_from_search_response_envelope() {

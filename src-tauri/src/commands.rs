@@ -252,17 +252,29 @@ pub async fn start_localsearch_inner(app: &AppHandle) {
     // 1) 워크스페이스 문서 인덱싱 — serve 전에 수행해 같은 DB 동시 접근을 피한다.
     //    (홈 전체 등 광범위 폴더는 가드로 건너뜀)
     if crate::localsearch::is_indexable_workspace(&workspace) {
-        let ws_name = workspace
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        set_status("indexing", ws_name);
-        let lc2 = lc.clone();
-        let ws = workspace.to_string_lossy().into_owned();
-        match tokio::task::spawn_blocking(move || crate::localsearch::run_index(&lc2, &ws)).await {
-            Ok(Ok(s)) => eprintln!("[localsearch] 워크스페이스 인덱싱: {s:?}"),
-            Ok(Err(e)) => eprintln!("[localsearch] 워크스페이스 인덱싱 실패: {e:#}"),
-            Err(e) => eprintln!("[localsearch] 인덱싱 태스크 조인 실패: {e}"),
+        // freshness 게이트: 직전 색인 이후 문서 변동이 없으면 풀 재색인을 건너뛰고 바로 serve.
+        // (재기동 체감의 지배 원인은 매번 전체 CPU 재임베딩 — 변동 없으면 수분→수초)
+        if crate::localsearch::is_index_fresh(&lc.db_dir, &workspace) {
+            eprintln!("[localsearch] 색인 최신 — 재색인 스킵, 바로 serve");
+        } else {
+            let ws_name = workspace
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            set_status("indexing", ws_name);
+            let lc2 = lc.clone();
+            let ws = workspace.to_string_lossy().into_owned();
+            match tokio::task::spawn_blocking(move || crate::localsearch::run_index(&lc2, &ws)).await {
+                Ok(Ok(s)) => {
+                    eprintln!("[localsearch] 워크스페이스 인덱싱: {s:?}");
+                    // 성공 시에만 지문 저장 — 다음 기동은 변동 없으면 스킵
+                    if let Err(e) = crate::localsearch::save_index_fingerprint(&lc.db_dir, &workspace) {
+                        eprintln!("[localsearch] 색인 지문 저장 실패(다음 기동 재색인): {e}");
+                    }
+                }
+                Ok(Err(e)) => eprintln!("[localsearch] 워크스페이스 인덱싱 실패: {e:#}"),
+                Err(e) => eprintln!("[localsearch] 인덱싱 태스크 조인 실패: {e}"),
+            }
         }
     }
 
