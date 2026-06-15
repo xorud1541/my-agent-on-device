@@ -367,7 +367,8 @@ impl LocalSearchServer {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
+            // tokio::process::Command 의 creation_flags 는 고유 메서드라 CommandExt 임포트 불필요
+            // (동기 std::process::Command 를 쓰는 run_index 쪽은 트레이트가 필요하다)
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
