@@ -4,6 +4,7 @@ use crate::llm::client::HttpLlmClient;
 use crate::models::{AgentEvent, ChatMessage};
 use crate::sessions::{SessionMeta, SessionStore};
 use crate::AppState;
+use base64::Engine as _;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,6 +15,111 @@ pub struct ModelEntry {
     pub name: String,
     pub path: String,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CaptureResult {
+    pub path: String,
+    pub thumb_data_url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 캡처 파일을 첨부용 결과(320px 썸네일 base64 포함)로 마무리한다.
+fn finalize_capture(path: &std::path::Path) -> Result<CaptureResult, String> {
+    let img = image::open(path).map_err(|e| format!("캡처 로드 실패: {e}"))?;
+    let thumb = img.thumbnail(320, 320);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    thumb
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("썸네일 인코딩 실패: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
+    Ok(CaptureResult {
+        path: path.to_string_lossy().into_owned(),
+        thumb_data_url: format!("data:image/png;base64,{b64}"),
+        width: img.width(),
+        height: img.height(),
+    })
+}
+
+/// 자체 영역 캡처 헬퍼(region-capture) 실행 파일 경로 — 본 앱과 같은 폴더에 빌드/동봉된다.
+fn region_capture_helper() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("실행 경로 조회 실패: {e}"))?;
+    let dir = exe.parent().ok_or("실행 폴더를 찾을 수 없습니다")?;
+    let name = if cfg!(windows) { "region-capture.exe" } else { "region-capture" };
+    let p = dir.join(name);
+    if p.exists() {
+        Ok(p)
+    } else {
+        Err(format!("캡처 헬퍼가 없습니다: {}", p.display()))
+    }
+}
+
+/// UI 주도 영역 캡처: 앱 숨김 → 자체 네이티브 오버레이 헬퍼(별도 프로세스)가 화면에 음영을
+/// 깔고 드래그 선택 → 선택 영역만 워크스페이스(captures/)에 저장 → 앱 복귀. 취소(Esc/우클릭)면 Ok(None).
+/// 헬퍼는 webview 가 아닌 순수 네이티브 창 + 별도 프로세스라 본 앱과 크래시가 격리된다.
+#[tauri::command]
+pub async fn capture_region(app: AppHandle) -> Result<Option<CaptureResult>, String> {
+    // 캡처 원본을 워크스페이스 아래 captures/ 에 저장한다 (기존 screen_capture 도구와 동일 관례).
+    let captures_dir = {
+        let state = app.state::<AppState>();
+        let cfg = state.config.lock().unwrap();
+        cfg.workspace_path().join("captures")
+    };
+    std::fs::create_dir_all(&captures_dir).map_err(|e| format!("captures 폴더 생성 실패: {e}"))?;
+    let out = captures_dir.join(format!(
+        "capture_{}.png",
+        chrono::Local::now().format("%Y%m%d_%H%M%S_%3f")
+    ));
+
+    let helper = region_capture_helper()?;
+    let main = app.get_webview_window("main");
+    // 헬퍼가 캡처할 모니터 힌트: 앱 창이 있는 모니터의 중심 (논리 px — xcap from_point 기준)
+    let point = main
+        .as_ref()
+        .and_then(|w| {
+            let mon = w.current_monitor().ok().flatten()?;
+            let sf = mon.scale_factor();
+            let pos = mon.position().to_logical::<f64>(sf);
+            let size = mon.size().to_logical::<f64>(sf);
+            Some(((pos.x + size.width / 2.0) as i32, (pos.y + size.height / 2.0) as i32))
+        })
+        .unwrap_or((0, 0));
+
+    if let Some(w) = &main {
+        let _ = w.hide();
+    }
+    // 창이 화면 프레임에서 빠지도록 짧게 대기 — 헬퍼가 찍는 화면에 앱이 남지 않게
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+    let out2 = out.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(helper);
+        cmd.arg(&out2)
+            .arg(point.0.to_string())
+            .arg(point.1.to_string());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.status()
+    })
+    .await
+    .map_err(|e| format!("캡처 태스크 실패: {e}"))?;
+
+    // 성공/취소/실패와 무관하게 창 복구
+    if let Some(w) = &main {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+
+    match status {
+        Err(e) => Err(format!("캡처 헬퍼 실행 실패: {e}")),
+        Ok(_) if out.exists() => finalize_capture(&out).map(Some),
+        Ok(_) => Ok(None), // 취소(Esc/우클릭) 또는 미선택
+    }
 }
 
 fn emit_event(app: &AppHandle, ev: AgentEvent) {
@@ -36,7 +142,8 @@ pub async fn set_config(app: AppHandle, new_config: AppConfig) -> Result<(), Str
             || cfg.device != new_config.device
             || cfg.n_gpu_layers != new_config.n_gpu_layers
             || cfg.ctx_size != new_config.ctx_size
-            || cfg.reasoning_budget != new_config.reasoning_budget;
+            || cfg.reasoning_budget != new_config.reasoning_budget
+            || cfg.mmproj_path != new_config.mmproj_path;
         *cfg = new_config.clone();
         cfg.save().map_err(|e| e.to_string())?;
         changed
@@ -167,9 +274,29 @@ pub fn cancel_turn(state: State<'_, AppState>, session_id: String) {
     }
 }
 
+/// 빈 화면 디스커버빌리티용 — 현재 워크스페이스를 1-depth 스캔한 요약 + 결정적 제안.
+/// 읽기 전용이라 워크스페이스 가드 불필요. 모델 미사용·결정적.
+#[tauri::command]
+pub fn workspace_summary(
+    state: State<'_, AppState>,
+) -> crate::workspace_summary::WorkspaceSummary {
+    let cfg = state.config.lock().unwrap();
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    crate::workspace_summary::summarize(
+        &cfg.workspace_path(),
+        &home,
+        std::path::Path::new(&cfg.removebg_model),
+    )
+}
+
 /// 사용자 발화 처리. 백그라운드 태스크로 에이전트 루프를 돌리고 즉시 반환한다.
 #[tauri::command]
-pub async fn send_message(app: AppHandle, session_id: String, text: String) -> Result<(), String> {
+pub async fn send_message(
+    app: AppHandle,
+    session_id: String,
+    text: String,
+    attachments: Vec<String>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
 
     let mut messages = {
@@ -183,7 +310,11 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
         let history = sessions
             .get_mut(&session_id)
             .ok_or_else(|| format!("세션 없음: {session_id}"))?;
-        history.push(ChatMessage::user(text));
+        history.push(if attachments.is_empty() {
+            ChatMessage::user(text)
+        } else {
+            ChatMessage::user_with_images(text, attachments.clone())
+        });
         history.clone()
     };
     {
@@ -202,16 +333,17 @@ pub async fn send_message(app: AppHandle, session_id: String, text: String) -> R
     if base_url.is_empty() {
         return Err("LLM 서버가 아직 준비되지 않음".into());
     }
-    let (max_rounds, temperature, max_output_tokens) = {
+    let (max_rounds, temperature, max_output_tokens, vision_enabled) = {
         let cfg = state.config.lock().unwrap();
-        (cfg.max_tool_rounds, cfg.temperature, cfg.max_output_tokens)
+        let vision = crate::llm::server::resolve_mmproj(&cfg.model_path, &cfg.mmproj_path).is_some();
+        (cfg.max_tool_rounds, cfg.temperature, cfg.max_output_tokens, vision)
     };
     let registry = state.registry.clone();
 
     let app2 = app.clone();
     let sid = session_id.clone();
     tauri::async_runtime::spawn(async move {
-        let client = HttpLlmClient::new(base_url, max_output_tokens);
+        let client = HttpLlmClient::new(base_url, max_output_tokens, vision_enabled);
         let app3 = app2.clone();
         // 턴 내에서 발생한 Error 이벤트도 대화 로그에 남도록 수집
         let turn_errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));

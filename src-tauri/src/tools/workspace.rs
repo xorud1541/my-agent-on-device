@@ -17,6 +17,23 @@ pub fn absorb_into_workspace(path: &str, ws: &Path) -> PathBuf {
     }
 }
 
+/// 산출물 기본 경로(출력 경로 미지정)를 결정한다.
+/// 입력이 워크스페이스 *안*이면 입력 옆(`file_name`), *밖*이면(앱 캐시 캡처 등)
+/// 워크스페이스 루트 아래 `file_name` 으로 떨군다.
+/// 캐시에서 연 캡처본을 배경제거/변환할 때 기본 출력이 캐시(워크스페이스 밖)로 떨어져
+/// `ensure_in_workspace` 에 거부당하던 문제를 원천 차단한다 (2026-06-13).
+pub fn default_output_in_workspace(input: &Path, file_name: &str, ws: &Path) -> PathBuf {
+    let inside = input
+        .parent()
+        .map(|d| ensure_in_workspace(&d.to_string_lossy(), ws).is_ok())
+        .unwrap_or(false);
+    if inside {
+        input.with_file_name(file_name)
+    } else {
+        ws.join(file_name)
+    }
+}
+
 /// 쓰기성 경로가 워크스페이스 안인지 검사한다. 위반 시 모델이 경로를 고쳐
 /// 재시도할 수 있는 한국어 오류를 돌려준다.
 ///
@@ -92,6 +109,30 @@ mod tests {
     use super::*;
     use crate::tools::test_support::ctx_with_workspace;
     use tempfile::tempdir;
+
+    #[test]
+    fn default_output_routes_outside_input_into_workspace() {
+        // 캐시(워크스페이스 밖) 입력 → 산출물 기본 경로는 워크스페이스 루트로
+        let ws = Path::new("/home/user/ws");
+        let got = default_output_in_workspace(
+            Path::new("/home/user/Library/Caches/app/captures/x.png"),
+            "x_nobg.png",
+            ws,
+        );
+        assert_eq!(got, Path::new("/home/user/ws/x_nobg.png"));
+    }
+
+    #[test]
+    fn default_output_keeps_inside_input_next_to_it() {
+        // 워크스페이스 안 입력 → 기존대로 입력 옆
+        let ws = Path::new("/home/user/ws");
+        let got = default_output_in_workspace(
+            Path::new("/home/user/ws/sub/y.png"),
+            "y_edited.png",
+            ws,
+        );
+        assert_eq!(got, Path::new("/home/user/ws/sub/y_edited.png"));
+    }
 
     #[test]
     fn inside_workspace_passes() {

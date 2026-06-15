@@ -6,6 +6,7 @@ pub mod logging;
 pub mod models;
 pub mod sessions;
 pub mod tools;
+pub mod workspace_summary;
 
 use config::AppConfig;
 use llm::server::LlamaServer;
@@ -51,11 +52,13 @@ pub fn run() {
             commands::restart_server,
             commands::new_session,
             commands::send_message,
+            commands::capture_region,
             commands::cancel_turn,
             commands::pick_folder,
             commands::list_sessions,
             commands::load_session,
             commands::delete_session,
+            commands::workspace_summary,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

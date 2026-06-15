@@ -45,7 +45,24 @@ function AssistantView({ msg }: { msg: AssistantMessage }) {
 
 export function MessageView({ msg }: { msg: UiMessage }) {
   if (msg.role === "user") {
-    return <div className="msg-user">{msg.text}</div>;
+    return (
+      <div className="msg-user">
+        {msg.images && msg.images.length > 0 && (
+          <div className="msg-user-images">
+            {msg.images.map((im, i) =>
+              im.thumb ? (
+                <img key={i} className="msg-thumb" src={im.thumb} alt="첨부 이미지" />
+              ) : (
+                <span key={i} className="msg-thumb-ph">
+                  📷 캡처
+                </span>
+              ),
+            )}
+          </div>
+        )}
+        {msg.text && <div className="msg-user-text">{msg.text}</div>}
+      </div>
+    );
   }
   return <AssistantView msg={msg} />;
 }

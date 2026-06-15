@@ -10,6 +10,10 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 첨부 이미지의 로컬(캐시) 경로. 세션에는 경로만 저장되고,
+    /// llama-server 로 보낼 때만 base64 image_url 로 인라인된다(client.rs).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub images: Option<Vec<String>>,
 }
 
 impl ChatMessage {
@@ -19,6 +23,7 @@ impl ChatMessage {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            images: None,
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
@@ -27,6 +32,7 @@ impl ChatMessage {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            images: None,
         }
     }
     pub fn assistant(content: Option<String>, tool_calls: Option<Vec<ToolCall>>) -> Self {
@@ -35,6 +41,7 @@ impl ChatMessage {
             content,
             tool_calls,
             tool_call_id: None,
+            images: None,
         }
     }
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -43,6 +50,20 @@ impl ChatMessage {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            images: None,
+        }
+    }
+    /// 첨부 이미지가 있는 사용자 메시지. content 텍스트 끝에 경로 마커를 붙여
+    /// 모델이 경로 기반 도구(remove_background 등)를 호출할 수 있게 한다.
+    pub fn user_with_images(text: impl Into<String>, images: Vec<String>) -> Self {
+        let text = text.into();
+        let marker = format!("\n\n[첨부 이미지: {}]", images.join(", "));
+        Self {
+            role: "user".into(),
+            content: Some(format!("{text}{marker}")),
+            tool_calls: None,
+            tool_call_id: None,
+            images: Some(images),
         }
     }
 }
@@ -122,4 +143,36 @@ pub struct CompletionResult {
     pub content: String,
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_roundtrip_through_json() {
+        let m = ChatMessage::user_with_images("이거 설명해줘", vec!["/cache/a.png".into()]);
+        let s = serde_json::to_string(&m).unwrap();
+        let back: ChatMessage = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.images.as_deref(), Some(&["/cache/a.png".to_string()][..]));
+        assert!(back.content.as_deref().unwrap().contains("/cache/a.png"));
+    }
+
+    #[test]
+    fn text_only_message_has_no_images_field() {
+        let m = ChatMessage::user("안녕");
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(!s.contains("images"), "텍스트 전용 메시지는 images 키가 없어야 함: {s}");
+    }
+
+    #[test]
+    fn user_with_images_embeds_path_marker() {
+        let m = ChatMessage::user_with_images(
+            "배경 제거해줘",
+            vec!["/c/x.png".into(), "/c/y.png".into()],
+        );
+        let c = m.content.as_deref().unwrap();
+        assert!(c.starts_with("배경 제거해줘"));
+        assert!(c.contains("[첨부 이미지: /c/x.png, /c/y.png]"));
+    }
 }
