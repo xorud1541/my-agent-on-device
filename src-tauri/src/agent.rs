@@ -240,6 +240,27 @@ fn is_file_op_command(user_text: &str) -> bool {
     VERBS.iter().any(|v| user_text.contains(v))
 }
 
+/// B 백스톱에서 RAG 턴에도 노출을 유지할 조회(읽기) 도구. 비파괴·비쓰기만 — 오판한
+/// RAG 턴에서 모델이 파일시스템을 들여다봐 회복할 수 있게 한다.
+const RAG_TURN_READ_TOOLS: &[&str] =
+    &["list_dir", "read_file", "search_files", "image_info", "pdf_extract_text"];
+
+/// B 백스톱 토글(절제실험용). 환경변수 `RAG_KEEP_READ_TOOLS=1`(또는 true)이면 RAG 턴에도
+/// 조회 도구를 남긴다. 기본은 꺼짐(= A 단독, 도구 전면 차단). config 스키마는 건드리지 않는다.
+fn rag_keep_read_tools() -> bool {
+    std::env::var("RAG_KEEP_READ_TOOLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// A 게이트 토글(절제실험용). `RAG_DISABLE_TOOL_INTENT=1`(또는 true)이면 tool_intent 를
+/// 우회해 순수 코사인 게이팅으로 돌린다(= A 끔). 2×2 절제(±A × ±B)에서 -A 셀에 쓴다.
+pub fn tool_intent_disabled() -> bool {
+    std::env::var("RAG_DISABLE_TOOL_INTENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// "지워/삭제" 류의 삭제 의도인가?
 fn is_delete_intent(user_text: &str) -> bool {
     const DELETE_VERBS: &[&str] = &["지워", "지우", "삭제"];
@@ -597,10 +618,20 @@ pub async fn run_turn(
         }
         // 라운드마다 재구성: 발화 기반 제외 + 이번 턴에서 루프가 감지된 도구
         let tools = if rag_on {
-            // RAG 근거가 들어온 턴은 도구를 제공하지 않는다 — 2B 가 내용 질문에도 도구로
-            // 빠지는 것을 차단하고 주입된 [참고 문서]로만 답하게 한다.
+            // RAG 근거가 들어온 턴은 기본적으로 도구를 제공하지 않는다 — 2B 가 내용 질문에도
+            // 도구로 빠지는 것을 차단하고 주입된 [참고 문서]로만 답하게 한다.
             // (2026-06-14 실로그: 검색도구만 숨기니 images_to_pdf 를 엉뚱하게 호출)
-            Value::Array(Vec::new())
+            //
+            // B 백스톱(RAG_KEEP_READ_TOOLS): 켜지면 조회(읽기) 도구만 남긴다. 게이트가
+            // 오판해 RAG 가 잘못 켜져도 모델이 list_dir/read_file 로 회복할 수 있게 —
+            // 쓰기성 도구는 계속 숨겨 "내용 질문에 쓰기 도구로 새는" 문제는 막는다.
+            if rag_keep_read_tools() {
+                let mut hidden = excluded.clone();
+                hidden.extend(looping_tools.iter().map(String::as_str));
+                registry.schemas_only(RAG_TURN_READ_TOOLS, &hidden)
+            } else {
+                Value::Array(Vec::new())
+            }
         } else {
             let mut hidden = excluded.clone();
             hidden.extend(looping_tools.iter().map(String::as_str));

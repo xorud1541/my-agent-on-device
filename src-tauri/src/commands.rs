@@ -428,7 +428,7 @@ pub async fn send_message(
         // 도구/파일 의도 발화는 코사인이 높아도 RAG 를 끄고 도구 경로로 보낸다.
         // 색인 문서가 파일작업을 '내용으로' 서술해 코사인만으론 "작업해줘"와 "설명해줘"를
         // 구분 못 한다(2026-06-15 실측: dog.png 회전 0.642 > 업무보고서 계획 0.599).
-        let rag = if crate::agent::tool_intent(&text) {
+        let rag = if !crate::agent::tool_intent_disabled() && crate::agent::tool_intent(&text) {
             None
         } else {
             match app2.state::<AppState>().search.lock().await.clone() {
