@@ -182,6 +182,51 @@ fn is_compress_intent(user_text: &str) -> bool {
     user_text.contains("압축해") || user_text.contains("압축하")
 }
 
+/// 발화에 "도구로 처리해야 하는" 구조적 의도가 있는가.
+/// RAG 게이트가 코사인과 무관하게 이걸 보고 도구 경로로 보낸다 — 색인 문서가
+/// 파일작업을 '내용으로' 서술해(예: QA플랜의 "jpg 90도 회전") 코사인만으론
+/// "작업해줘"와 "설명해줘"를 구분 못 하기 때문(2026-06-15 실측: 두 군집 0.59~0.64 포개짐).
+/// 신호는 토픽 명사가 아니라 ① 파일명.확장자 ② 상태조회 ③ 파일조작 명령동사.
+pub fn tool_intent(user_text: &str) -> bool {
+    has_filename_with_ext(user_text)
+        || is_filesystem_state_query(user_text)
+        || is_compress_intent(user_text)
+        || is_extract_intent(user_text)
+        || is_file_op_command(user_text)
+}
+
+/// "x.png/보고서.pdf" 처럼 확장자 붙은 파일명이 있는가 (도구 대상 지목).
+/// "." 앞에 글자가 붙어야 파일명으로 본다("2분기. 계획" 같은 문장부호는 제외).
+fn has_filename_with_ext(user_text: &str) -> bool {
+    const EXTS: &[&str] = &[
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf", ".zip", ".txt", ".md", ".csv",
+    ];
+    let lower = user_text.to_lowercase();
+    EXTS.iter().any(|e| {
+        lower
+            .match_indices(e)
+            .any(|(i, _)| i > 0 && lower.as_bytes()[i - 1].is_ascii_alphanumeric())
+    })
+}
+
+/// "뭐있지/목록/리스트/몇개" 류의 파일시스템 상태 조회인가 (→ list_dir).
+/// 주의: "계획이 뭐야?" 같은 내용 질문의 "뭐야"는 포함하지 않는다.
+fn is_filesystem_state_query(user_text: &str) -> bool {
+    const Q: &[&str] = &["뭐있", "뭐 있", "목록", "리스트", "몇 개", "몇개"];
+    Q.iter().any(|k| user_text.contains(k))
+}
+
+/// 파일을 직접 조작하는 명령동사(행동형)인가. 토픽 오발동을 줄이려 "삭제"가 아니라
+/// "삭제해", "회전"이 아니라 "회전해" 처럼 행동 어미를 요구한다.
+fn is_file_op_command(user_text: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "회전해", "돌려", "리사이즈", "크기조절", "크기 조절", "변환해", "변환하", "배경제거",
+        "배경 제거", "누끼", "배경 지워", "모자이크", "삭제해", "지워", "옮겨", "이동해",
+        "이름 바꿔", "이름바꿔", "이름 변경", "이름변경", "rename",
+    ];
+    VERBS.iter().any(|v| user_text.contains(v))
+}
+
 /// "지워/삭제" 류의 삭제 의도인가?
 fn is_delete_intent(user_text: &str) -> bool {
     const DELETE_VERBS: &[&str] = &["지워", "지우", "삭제"];
@@ -1140,6 +1185,36 @@ mod tests {
         ];
         assert!(!rag_active(&without));
     }
+
+    #[test]
+    fn tool_intent_true_for_filesystem_and_tool_questions() {
+        // 측정 실로그(2026-06-15): 코사인이 높아도(0.53~0.64) 이 발화들은 RAG 가 아니라
+        // 도구로 가야 한다 — 도구 의도 구조(상태조회/파일조작 동사/파일명.확장자)가 있다.
+        for q in [
+            "현재 압축파일 뭐있지?",     // 상태 조회 → list_dir
+            "현재 폴더의 파일리스트는?",  // 목록
+            "고양이 사진 압축해줘",       // 압축 도구
+            "dog.png 90도 회전해줘",      // 파일명.확장자 + 회전 동사
+        ] {
+            assert!(tool_intent(q), "도구 의도로 판별돼야 함: {q:?}");
+        }
+    }
+
+    #[test]
+    fn tool_intent_false_for_document_questions() {
+        // 문서 내용 질문 — RAG 가 발동해야 정상(도구 의도 아님). '폴더' 같은 토픽 명사가
+        // 있어도 내용 동사(요약/설명/궁금)면 도구 의도가 아니다.
+        for q in [
+            "알캡처 기능에 대해 궁금해",
+            "알캡처 매뉴얼 요약해줘",
+            "업무보고서 2분기 계획이 뭐야?",
+            "이 폴더의 알캡처 매뉴얼 요약해줘",
+            "앨리스 사용 시나리오 설명해줘",
+        ] {
+            assert!(!tool_intent(q), "문서 질문이라 도구 의도가 아니어야 함: {q:?}");
+        }
+    }
+
     use crate::llm::client::DeltaSink;
     use crate::models::{CompletionResult, FunctionCall, ToolCall};
     use std::sync::Mutex;
