@@ -110,28 +110,29 @@ mod tests {
     use crate::tools::test_support::ctx_with_workspace;
     use tempfile::tempdir;
 
+    // 플랫폼별 절대경로 베이스 — Windows 는 드라이브 접두사가 없으면
+    // is_absolute()가 false 라 normalize 가 거부한다.
+    #[cfg(windows)]
+    const BASE: &str = r"C:\home\user";
+    #[cfg(not(windows))]
+    const BASE: &str = "/home/user";
+
     #[test]
     fn default_output_routes_outside_input_into_workspace() {
         // 캐시(워크스페이스 밖) 입력 → 산출물 기본 경로는 워크스페이스 루트로
-        let ws = Path::new("/home/user/ws");
-        let got = default_output_in_workspace(
-            Path::new("/home/user/Library/Caches/app/captures/x.png"),
-            "x_nobg.png",
-            ws,
-        );
-        assert_eq!(got, Path::new("/home/user/ws/x_nobg.png"));
+        let ws = PathBuf::from(BASE).join("ws");
+        let input = PathBuf::from(BASE).join("Library/Caches/app/captures/x.png");
+        let got = default_output_in_workspace(&input, "x_nobg.png", &ws);
+        assert_eq!(got, ws.join("x_nobg.png"));
     }
 
     #[test]
     fn default_output_keeps_inside_input_next_to_it() {
         // 워크스페이스 안 입력 → 기존대로 입력 옆
-        let ws = Path::new("/home/user/ws");
-        let got = default_output_in_workspace(
-            Path::new("/home/user/ws/sub/y.png"),
-            "y_edited.png",
-            ws,
-        );
-        assert_eq!(got, Path::new("/home/user/ws/sub/y_edited.png"));
+        let ws = PathBuf::from(BASE).join("ws");
+        let input = ws.join("sub").join("y.png");
+        let got = default_output_in_workspace(&input, "y_edited.png", &ws);
+        assert_eq!(got, ws.join("sub").join("y_edited.png"));
     }
 
     #[test]
