@@ -229,6 +229,64 @@ pub async fn restart_server(app: AppHandle) -> Result<(), String> {
     start_server_inner(&app).await
 }
 
+/// 로컬 검색 사이드카 기동 (앱 시작 시). 미구성/바이너리 없음이면 조용히 비활성한다.
+/// 워크스페이스(사용자 지정 폴더)의 문서를 인덱싱한 뒤 사이드카(serve)를 띄운다.
+/// 실패해도 앱 동작에는 지장 없으므로 에러를 전파하지 않는다(검색만 비활성).
+pub async fn start_localsearch_inner(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    // 상태를 AppState 에 기록하고 동시에 UI 로 방송한다 (콜드 스타트 레이스는 마운트 조회로 보완)
+    let set_status = |st: &str, detail: String| {
+        *state.localsearch_status.lock().unwrap() = (st.to_string(), detail.clone());
+        emit_event(app, AgentEvent::LocalsearchStatus { status: st.into(), detail });
+    };
+
+    let (cfg, workspace) = {
+        let c = state.config.lock().unwrap();
+        (c.clone(), c.workspace_path())
+    };
+    let Some(lc) = crate::localsearch::LocalSearchConfig::from_app(&cfg) else {
+        set_status("disabled", String::new()); // 로컬 검색 미구성 → 검색 없이 동작
+        return;
+    };
+
+    // 1) 워크스페이스 문서 인덱싱 — serve 전에 수행해 같은 DB 동시 접근을 피한다.
+    //    (홈 전체 등 광범위 폴더는 가드로 건너뜀)
+    if crate::localsearch::is_indexable_workspace(&workspace) {
+        let ws_name = workspace
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        set_status("indexing", ws_name);
+        let lc2 = lc.clone();
+        let ws = workspace.to_string_lossy().into_owned();
+        match tokio::task::spawn_blocking(move || crate::localsearch::run_index(&lc2, &ws)).await {
+            Ok(Ok(s)) => eprintln!("[localsearch] 워크스페이스 인덱싱: {s:?}"),
+            Ok(Err(e)) => eprintln!("[localsearch] 워크스페이스 인덱싱 실패: {e:#}"),
+            Err(e) => eprintln!("[localsearch] 인덱싱 태스크 조인 실패: {e}"),
+        }
+    }
+
+    // 2) 사이드카(serve) 기동 → 검색 클라이언트 보관
+    let mut server = state.localsearch.lock().await;
+    match server.start(&lc).await {
+        Ok(client) => {
+            let count = client.indexed_count().await.unwrap_or(0);
+            *state.search.lock().await = Some(client);
+            set_status("ready", format!("{count}개 문서"));
+        }
+        Err(e) => {
+            eprintln!("localsearch 사이드카 기동 실패(검색 비활성): {e:#}");
+            set_status("error", format!("{e}"));
+        }
+    }
+}
+
+/// 현재 로컬 검색 상태 조회 (프론트 마운트 시 인덱싱 배너 레이스 보완용).
+#[tauri::command]
+pub fn get_localsearch_status(state: State<'_, AppState>) -> (String, String) {
+    state.localsearch_status.lock().unwrap().clone()
+}
+
 #[tauri::command]
 pub fn new_session(state: State<'_, AppState>) -> String {
     let id = uuid::Uuid::new_v4().to_string();
@@ -311,9 +369,9 @@ pub async fn send_message(
             .get_mut(&session_id)
             .ok_or_else(|| format!("세션 없음: {session_id}"))?;
         history.push(if attachments.is_empty() {
-            ChatMessage::user(text)
+            ChatMessage::user(text.clone())
         } else {
-            ChatMessage::user_with_images(text, attachments.clone())
+            ChatMessage::user_with_images(text.clone(), attachments.clone())
         });
         history.clone()
     };
@@ -364,6 +422,28 @@ pub async fn send_message(
             Arc::new(move |ev| emit_event(&notify_app, ev)),
         );
 
+        // RAG 프리훅: 색인이 있으면 발화를 검색해 근거 블록을 system(messages[0]) 에 합친다.
+        // 이번 턴 LLM 호출에만 쓰고 세션에는 저장하지 않으므로, run_turn 뒤 원복한다.
+        let sys_backup = messages.first().and_then(|m| m.content.clone());
+        let rag = match app2.state::<AppState>().search.lock().await.clone() {
+            Some(client) => {
+                client
+                    .rag_context(&text, crate::localsearch::RAG_TOP_K, crate::localsearch::RAG_MIN_COSINE)
+                    .await
+            }
+            None => None,
+        };
+        if let Some(rc) = &rag {
+            // 출처를 UI 로 방송 (말풍선 하단 표시)
+            emit(AgentEvent::Sources {
+                session_id: sid.clone(),
+                sources: rc.sources.clone(),
+            });
+            if let Some(sys0) = messages.first_mut() {
+                sys0.content = Some(format!("{}\n\n{}", sys_backup.as_deref().unwrap_or(""), rc.block));
+            }
+        }
+
         let pre_len = messages.len() - 1; // 이번 턴 user 메시지부터 로그에 포함
         let started = std::time::Instant::now();
         let run = agent::run_turn(
@@ -371,6 +451,13 @@ pub async fn send_message(
             &emit,
         )
         .await;
+
+        // RAG 근거 블록 원복 — 저장/세션에 스테일 컨텍스트가 남지 않도록
+        if rag.is_some() {
+            if let Some(sys0) = messages.first_mut() {
+                sys0.content = sys_backup;
+            }
+        }
 
         let mut all_errors: Vec<String> = turn_errors.lock().unwrap().clone();
         if let Err(e) = run.as_ref() {

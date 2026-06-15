@@ -8,6 +8,7 @@ import type {
   AssistantMessage,
   ChatMessage,
   ServerStatus,
+  LocalsearchStatus,
   UiMessage,
   WorkspaceSummary,
 } from "../types";
@@ -20,6 +21,7 @@ export function useAgent() {
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [server, setServer] = useState<ServerStatus>({ status: "loading", detail: "" });
+  const [localsearch, setLocalsearch] = useState<LocalsearchStatus>({ status: "disabled", detail: "" });
   // 살아있는 설정(워크스페이스/페르소나) — 설정 패널이든 에이전트 도구든
   // 어디서 바뀌어도 config-changed 이벤트로 즉시 갱신된다
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -45,6 +47,10 @@ export function useAgent() {
     const unlisten = listen<AgentEvent>("agent-event", ({ payload: ev }) => {
       if (ev.type === "server-status") {
         setServer({ status: ev.status, detail: ev.detail });
+        return;
+      }
+      if (ev.type === "localsearch-status") {
+        setLocalsearch({ status: ev.status, detail: ev.detail });
         return;
       }
       if (ev.type === "config-changed") {
@@ -106,6 +112,9 @@ export function useAgent() {
             segments: [...m.segments, { kind: "error", message: ev.message }],
           }));
           break;
+        case "sources":
+          patchAssistant((m) => ({ ...m, sources: ev.sources }));
+          break;
         case "turn-end":
           patchAssistant((m) => ({
             ...m,
@@ -125,6 +134,12 @@ export function useAgent() {
   useEffect(() => {
     invoke<AppConfig>("get_config").then(setConfig).catch(() => {});
     refreshSummary();
+    // 인덱싱 배너 레이스 보정: 마운트 시 현재 로컬 검색 상태를 조회 (이후는 이벤트가 갱신)
+    invoke<[string, string]>("get_localsearch_status")
+      .then(([status, detail]) =>
+        setLocalsearch({ status: status as LocalsearchStatus["status"], detail }),
+      )
+      .catch(() => {});
   }, [refreshSummary]);
 
   // ready 이벤트가 리스너 등록 전에 발행되는 레이스 보정: ready 가 아닐 동안 상태 폴링
@@ -204,5 +219,5 @@ export function useAgent() {
     setBusy(false);
   }, []);
 
-  return { messages, busy, server, config, summary, send, cancel, newChat, loadSession, sessionId };
+  return { messages, busy, server, localsearch, config, summary, send, cancel, newChat, loadSession, sessionId };
 }

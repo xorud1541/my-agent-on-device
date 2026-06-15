@@ -474,6 +474,15 @@ fn close_dangling_tool_calls(messages: &mut Vec<ChatMessage>) {
     }
 }
 
+/// 시스템 메시지(messages[0])에 RAG 근거 블록이 합쳐져 있는가.
+fn rag_active(messages: &[ChatMessage]) -> bool {
+    messages
+        .first()
+        .and_then(|m| m.content.as_deref())
+        .map(|c| c.contains(crate::localsearch::RAG_MARKER))
+        .unwrap_or(false)
+}
+
 /// 사용자 발화 1회를 처리하는 에이전트 루프.
 /// 메시지 히스토리를 직접 갱신하며, 진행 상황을 emit 으로 흘린다.
 pub async fn run_turn(
@@ -505,6 +514,8 @@ pub async fn run_turn(
             excluded.push(*t);
         }
     }
+    // RAG 근거가 들어온 턴이면 정보검색 도구를 숨겨, 주입된 문서로 답하게 한다
+    let rag_on = rag_active(messages);
     // 같은 (도구, 인자) 반복 차단 — 작은 모델의 루프 + 컨텍스트 낭비 방지
     let mut executed: std::collections::HashSet<(String, String)> = Default::default();
     // 중복 호출이 거절된 도구 — 다음 라운드부터 스키마에서 숨긴다. 2B 는 보이는 도구를
@@ -527,7 +538,12 @@ pub async fn run_turn(
             break;
         }
         // 라운드마다 재구성: 발화 기반 제외 + 이번 턴에서 루프가 감지된 도구
-        let tools = {
+        let tools = if rag_on {
+            // RAG 근거가 들어온 턴은 도구를 제공하지 않는다 — 2B 가 내용 질문에도 도구로
+            // 빠지는 것을 차단하고 주입된 [참고 문서]로만 답하게 한다.
+            // (2026-06-14 실로그: 검색도구만 숨기니 images_to_pdf 를 엉뚱하게 호출)
+            Value::Array(Vec::new())
+        } else {
             let mut hidden = excluded.clone();
             hidden.extend(looping_tools.iter().map(String::as_str));
             registry.schemas_excluding(&hidden)
@@ -1108,6 +1124,22 @@ fn compact_old_tool_results(messages: &mut [ChatMessage]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rag_active_detects_marker_in_system_message() {
+        let marker = crate::localsearch::RAG_MARKER;
+        let with = vec![
+            ChatMessage::system(format!("시스템 프롬프트\n\n{marker}\n[#1 문서: a.pdf] 내용")),
+            ChatMessage::user("질문"),
+        ];
+        assert!(rag_active(&with));
+
+        let without = vec![
+            ChatMessage::system("시스템 프롬프트"),
+            ChatMessage::user("질문"),
+        ];
+        assert!(!rag_active(&without));
+    }
     use crate::llm::client::DeltaSink;
     use crate::models::{CompletionResult, FunctionCall, ToolCall};
     use std::sync::Mutex;

@@ -6,7 +6,13 @@ export type AgentEvent =
   | { type: "tool-call-end"; session_id: string; call_id: string; name: string; ok: boolean; result: string }
   | { type: "turn-end"; session_id: string; elapsed_ms: number }
   | { type: "error"; session_id: string; message: string }
+  | { type: "sources"; session_id: string; sources: string[] }
   | { type: "server-status"; status: "loading" | "ready" | "down"; detail: string }
+  | {
+      type: "localsearch-status";
+      status: "indexing" | "ready" | "disabled" | "error";
+      detail: string;
+    }
   | { type: "config-changed"; config: AppConfig };
 
 // 어시스턴트 턴은 발생 순서대로 쌓이는 세그먼트의 나열이다
@@ -35,6 +41,8 @@ export interface AssistantMessage {
   segments: Segment[];
   /** 진행 중이면 undefined, 끝나면 소요 ms */
   elapsedMs?: number;
+  /** RAG 근거로 사용된 출처 문서 파일명 (말풍선 하단 표시) */
+  sources?: string[];
 }
 
 export type UiMessage = UserMessage | AssistantMessage;
@@ -93,6 +101,16 @@ export interface AppConfig {
   agent_name: string;
   removebg_model: string;
   mmproj_path: string;
+  localsearch_enabled: boolean;
+  localsearch_bin: string;
+  localsearch_models_dir: string;
+  localsearch_db_dir: string;
+  localsearch_port: number;
+  ort_dylib: string;
 }
 
 export type ServerStatus = { status: "loading" | "ready" | "down"; detail: string };
+export type LocalsearchStatus = {
+  status: "indexing" | "ready" | "disabled" | "error";
+  detail: string;
+};

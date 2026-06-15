@@ -125,8 +125,18 @@ pub enum AgentEvent {
         session_id: String,
         message: String,
     },
+    /// RAG 근거로 사용된 출처 문서 목록 (말풍선 하단 표시용)
+    Sources {
+        session_id: String,
+        sources: Vec<String>,
+    },
     /// llama-server 상태 변화 (loading | ready | down)
     ServerStatus {
+        status: String,
+        detail: String,
+    },
+    /// 로컬 검색 인덱싱/사이드카 상태 (indexing | ready | disabled | error)
+    LocalsearchStatus {
         status: String,
         detail: String,
     },

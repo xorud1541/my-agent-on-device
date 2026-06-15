@@ -36,6 +36,18 @@ pub struct AppConfig {
     /// 멀티모달 vision 프로젝터(mmproj) 경로. 빈 값이면 모델과 같은 폴더의
     /// `mmproj-*.gguf` 를 자동 페어링한다.
     pub mmproj_path: String,
+    /// 로컬 검색(LocalSearch 사이드카) 사용 여부. 바이너리/모델이 없으면 조용히 비활성.
+    pub localsearch_enabled: bool,
+    /// localsearch-cli 실행 파일 경로 (빈 값이면 LOCALSEARCH_CLI_BIN 환경변수로 폴백)
+    pub localsearch_bin: String,
+    /// harrier-v1-270m-onnx 의 부모 디렉토리 (빈 값이면 환경변수 폴백)
+    pub localsearch_models_dir: String,
+    /// 색인 DB 디렉토리 (빈 값이면 앱 데이터 폴더 기본 경로)
+    pub localsearch_db_dir: String,
+    /// 로컬 검색 사이드카 포트
+    pub localsearch_port: u16,
+    /// libonnxruntime 동적 라이브러리 경로 → 사이드카에 ORT_DYLIB_PATH 로 전달
+    pub ort_dylib: String,
 }
 
 impl Default for AppConfig {
@@ -58,8 +70,34 @@ impl Default for AppConfig {
             agent_name: String::new(),
             removebg_model: default_removebg_model(),
             mmproj_path: String::new(),
+            localsearch_enabled: true,
+            localsearch_bin: String::new(),
+            localsearch_models_dir: default_localsearch_models_dir(),
+            localsearch_db_dir: String::new(),
+            localsearch_port: 11434,
+            ort_dylib: default_ort_dylib(),
         }
     }
+}
+
+fn default_localsearch_models_dir() -> String {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".alice")
+        .join("models")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// 사이드카에 넘길 onnxruntime 동적 라이브러리 기본 경로. macOS=Homebrew, 그 외=빈 값(시스템 탐색).
+#[cfg(target_os = "macos")]
+fn default_ort_dylib() -> String {
+    "/opt/homebrew/lib/libonnxruntime.dylib".to_string()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_ort_dylib() -> String {
+    String::new()
 }
 
 fn default_workspace_dir() -> String {
@@ -177,7 +215,10 @@ mod tests {
             ..AppConfig::default()
         };
         let p = cfg.workspace_path();
-        assert!(p.exists(), "사라진 워크스페이스는 존재하는 경로로 폴백해야 함: {p:?}");
+        assert!(
+            p.exists(),
+            "사라진 워크스페이스는 존재하는 경로로 폴백해야 함: {p:?}"
+        );
     }
 
     #[test]
