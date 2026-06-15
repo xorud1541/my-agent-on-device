@@ -14,7 +14,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
@@ -51,21 +51,18 @@ struct App {
 }
 
 impl App {
-    /// 창의 글로벌 위치/배율을 반영해, 창 픽셀 (px,py) → 원본 이미지 픽셀 좌표로 변환할
-    /// 스케일/오프셋을 구한다. (메뉴바/작업표시줄로 창이 모니터를 다 못 덮어도 정확)
+    /// 창 픽셀 (px,py) → 원본 이미지 픽셀 좌표로 변환할 오프셋/배율을 구한다.
+    /// 창은 모니터의 물리 해상도(PhysicalSize)로 생성되고 캡처본(src)도 물리 해상도라
+    /// 둘은 1:1 이다. 따라서 배율(scale_factor) 재적용 없이, 창이 모니터를 다 못 덮어
+    /// 생기는 물리 위치 차이만 보정하면 된다. (HiDPI 배율 이중 적용 문제를 원천 차단)
     fn mapping(&self, window: &Window) -> (f64, f64, f64) {
-        let sf = window.scale_factor();
         let pos = window
             .inner_position()
-            .map(|p| (p.x as f64 / sf, p.y as f64 / sf))
+            .map(|p| (p.x as f64, p.y as f64))
             .unwrap_or((self.mon.x, self.mon.y));
-        // 원본 이미지 px / 모니터 논리 px (Retina 면 ≈ 2.0)
-        let img_scale = self.src.width() as f64 / self.mon.w.max(1.0);
-        let off_x = (pos.0 - self.mon.x) * img_scale;
-        let off_y = (pos.1 - self.mon.y) * img_scale;
-        // 창 물리 px → 원본 px 배율 (보통 1.0)
-        let px_scale = img_scale / sf;
-        (off_x, off_y, px_scale)
+        let off_x = pos.0 - self.mon.x;
+        let off_y = pos.1 - self.mon.y;
+        (off_x, off_y, 1.0)
     }
 
     /// 창 크기에 맞춘 dimmed/bright 프레임 생성 (오버레이 열릴 때 1회)
@@ -110,19 +107,24 @@ impl App {
     }
 
     fn redraw(&mut self) {
-        let Some(window) = self.window.clone() else { return };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         let size = window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        else {
+        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return;
         };
         self.build_frames(size.width, size.height);
         let sel = self.sel_rect(); // surface 가변 차용 전에 계산 (차용 충돌 방지)
-        let Some(surface) = self.surface.as_mut() else { return };
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
         if surface.resize(w, h).is_err() {
             return;
         }
-        let Ok(mut buffer) = surface.buffer_mut() else { return };
+        let Ok(mut buffer) = surface.buffer_mut() else {
+            return;
+        };
         buffer.copy_from_slice(&self.dimmed);
 
         if let Some((x0, y0, x1, y1)) = sel {
@@ -133,7 +135,8 @@ impl App {
             // 선택 영역은 원본 밝기로
             for y in y0..=y1 {
                 let row = y * ww;
-                buffer[row + x0..row + x1 + 1].copy_from_slice(&self.bright[row + x0..row + x1 + 1]);
+                buffer[row + x0..row + x1 + 1]
+                    .copy_from_slice(&self.bright[row + x0..row + x1 + 1]);
             }
             // 테두리 2px
             for t in 0..2usize {
@@ -154,7 +157,9 @@ impl App {
 
     /// 드래그 종료: 선택 영역을 원본에서 크롭해 저장
     fn finish(&mut self, event_loop: &ActiveEventLoop) {
-        let Some((x0, y0, x1, y1)) = self.sel_rect() else { return };
+        let Some((x0, y0, x1, y1)) = self.sel_rect() else {
+            return;
+        };
         self.drag_start = None;
         if ((x1 - x0) as f64) < MIN_SEL || ((y1 - y0) as f64) < MIN_SEL {
             self.redraw();
@@ -187,11 +192,16 @@ impl ApplicationHandler for App {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_position(winit::dpi::Position::Logical(LogicalPosition::new(
-                self.mon.x, self.mon.y,
+            // xcap 가 주는 모니터 좌표/크기는 물리 픽셀이므로 Physical 로 그대로 넘긴다.
+            // (Logical 로 넘기면 HiDPI 에서 winit 이 scale_factor 를 재적용해 창이 배율²
+            //  만큼 커지고 버퍼 할당이 폭증한다 — 150% 4K 에서 5760×3240 OOM)
+            .with_position(winit::dpi::Position::Physical(PhysicalPosition::new(
+                self.mon.x as i32,
+                self.mon.y as i32,
             )))
-            .with_inner_size(winit::dpi::Size::Logical(LogicalSize::new(
-                self.mon.w, self.mon.h,
+            .with_inner_size(winit::dpi::Size::Physical(PhysicalSize::new(
+                self.mon.w as u32,
+                self.mon.h as u32,
             )));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -215,12 +225,7 @@ impl ApplicationHandler for App {
         window.request_redraw();
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
