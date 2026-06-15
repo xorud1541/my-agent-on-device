@@ -121,7 +121,8 @@ impl Tool for ImageTransform {
         }
 
         let format = opt_str(args, "format");
-        let out_path = resolve_output_path(path, opt_str(args, "output_path"), format, &ctx.workspace())?;
+        let out_path =
+            resolve_output_path(path, opt_str(args, "output_path"), format, &ctx.workspace())?;
         // 이름만 온 출력 경로는 워크스페이스로 흡수 (2026-06-12 R7 패턴)
         let out_path = crate::tools::workspace::absorb_into_workspace(
             &out_path.to_string_lossy(),

@@ -372,7 +372,11 @@ mod tests {
         let ctx = ctx_with_workspace(&ws);
         let input = cache.join("capture_x.png");
         let img: image::RgbImage = image::ImageBuffer::from_fn(64, 48, |x, _| {
-            if x > 20 { image::Rgb([200, 30, 30]) } else { image::Rgb([250, 250, 250]) }
+            if x > 20 {
+                image::Rgb([200, 30, 30])
+            } else {
+                image::Rgb([250, 250, 250])
+            }
         });
         img.save(&input).unwrap();
 
@@ -382,6 +386,9 @@ mod tests {
         // 산출물이 워크스페이스 안 _nobg.png
         let expected = ws.join("capture_x_nobg.png");
         assert!(expected.exists(), "워크스페이스에 산출물 없음. 결과: {out}");
-        assert!(out.contains(&expected.to_string_lossy().to_string()), "{out}");
+        assert!(
+            out.contains(&expected.to_string_lossy().to_string()),
+            "{out}"
+        );
     }
 }
