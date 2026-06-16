@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 앱 설정. `%APPDATA%/com.estsoft.local-agent/config.json`에 저장.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,9 +69,9 @@ impl Default for AppConfig {
             user_name: String::new(),
             agent_name: String::new(),
             removebg_model: default_removebg_model(),
-            mmproj_path: String::new(),
+            mmproj_path: default_mmproj_path(),
             localsearch_enabled: true,
-            localsearch_bin: String::new(),
+            localsearch_bin: default_localsearch_bin(),
             localsearch_models_dir: default_localsearch_models_dir(),
             localsearch_db_dir: String::new(),
             localsearch_port: 11434,
@@ -80,7 +80,36 @@ impl Default for AppConfig {
     }
 }
 
+/// 현재 실행 파일이 위치한 디렉토리. (설치본 레이아웃의 기준점)
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+}
+
+/// 설치본 우선 경로 해석. `exe_dir/rel` 이 실제로 존재하면 그 절대경로를,
+/// 없으면 `dev_fallback()`(개발 PC 기본 경로)을 돌려준다.
+/// exe_dir 를 인자로 받아 테스트에서 임시 폴더로 양쪽 분기를 검증할 수 있게 했다.
+fn installed_or(
+    exe_dir: Option<&Path>,
+    rel: &str,
+    dev_fallback: impl FnOnce() -> String,
+) -> String {
+    if let Some(dir) = exe_dir {
+        let p = dir.join(rel);
+        if p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    dev_fallback()
+}
+
 fn default_localsearch_models_dir() -> String {
+    // 설치본: exe 옆 models/ (harrier-v1-270m-onnx 의 부모). 개발: ~/.alice/models.
+    installed_or(exe_dir().as_deref(), "models", dev_localsearch_models_dir)
+}
+
+fn dev_localsearch_models_dir() -> String {
     dirs::home_dir()
         .unwrap_or_default()
         .join(".alice")
@@ -89,13 +118,41 @@ fn default_localsearch_models_dir() -> String {
         .into_owned()
 }
 
-/// 사이드카에 넘길 onnxruntime 동적 라이브러리 기본 경로. macOS=Homebrew, 그 외=빈 값(시스템 탐색).
-#[cfg(target_os = "macos")]
-fn default_ort_dylib() -> String {
-    "/opt/homebrew/lib/libonnxruntime.dylib".to_string()
+/// localsearch-cli 실행 파일 기본 경로. 설치본: exe 옆 localsearch/.
+/// 개발: 빈 값 → LocalSearchConfig 가 LOCALSEARCH_CLI_BIN 환경변수로 폴백.
+fn default_localsearch_bin() -> String {
+    #[cfg(target_os = "windows")]
+    let rel = "localsearch/localsearch-cli.exe";
+    #[cfg(not(target_os = "windows"))]
+    let rel = "localsearch/localsearch-cli";
+    installed_or(exe_dir().as_deref(), rel, String::new)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// 멀티모달 vision 프로젝터(mmproj) 기본 경로. 설치본: exe 옆 models/mmproj-*.gguf.
+/// 개발: 빈 값 → 런타임이 모델과 같은 폴더의 mmproj-*.gguf 를 자동 페어링.
+fn default_mmproj_path() -> String {
+    installed_or(
+        exe_dir().as_deref(),
+        "models/mmproj-Qwen3.5-2B-BF16.gguf",
+        String::new,
+    )
+}
+
+/// 사이드카에 넘길 onnxruntime 동적 라이브러리 기본 경로.
+/// 설치본(Windows): exe 옆 onnxruntime.dll. 개발: macOS=Homebrew, 그 외=빈 값(시스템 탐색).
+#[cfg(target_os = "windows")]
+fn default_ort_dylib() -> String {
+    installed_or(exe_dir().as_deref(), "onnxruntime.dll", String::new)
+}
+
+#[cfg(target_os = "macos")]
+fn default_ort_dylib() -> String {
+    installed_or(exe_dir().as_deref(), "libonnxruntime.dylib", || {
+        "/opt/homebrew/lib/libonnxruntime.dylib".to_string()
+    })
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn default_ort_dylib() -> String {
     String::new()
 }
@@ -108,6 +165,15 @@ fn default_workspace_dir() -> String {
 }
 
 fn default_removebg_model() -> String {
+    // 설치본: exe 옆 models/removeBG.ort. 개발: ~/.alice/models/removeBG.ort.
+    installed_or(
+        exe_dir().as_deref(),
+        "models/removeBG.ort",
+        dev_removebg_model,
+    )
+}
+
+fn dev_removebg_model() -> String {
     let home = dirs::home_dir().unwrap_or_default();
     home.join(".alice")
         .join("models")
@@ -116,11 +182,20 @@ fn default_removebg_model() -> String {
         .into_owned()
 }
 
-/// llama-server 실행 파일 기본 경로. OS별로 분기한다.
-/// Windows = Downloads의 Vulkan 빌드(.exe), macOS = Homebrew Metal 빌드,
-/// 그 외(Linux 등) = PATH 상의 llama-server.
+/// llama-server 실행 파일 기본 경로.
+/// 설치본: exe 옆 llama/. 개발: Windows=Downloads의 Vulkan 빌드(.exe),
+/// macOS=Homebrew Metal 빌드, 그 외(Linux 등)=PATH 상의 llama-server.
 #[cfg(target_os = "windows")]
 fn default_server_exe() -> String {
+    installed_or(
+        exe_dir().as_deref(),
+        "llama/llama-server.exe",
+        dev_server_exe,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn dev_server_exe() -> String {
     let home = dirs::home_dir().unwrap_or_default();
     home.join("Downloads")
         .join("llama-b9334-bin-win-vulkan-x64")
@@ -133,12 +208,16 @@ fn default_server_exe() -> String {
 fn default_server_exe() -> String {
     // Homebrew(llama.cpp 포뮬러)가 Apple Silicon에 설치하는 표준 경로.
     // 직접 빌드한 경우 등 다르면 config.json 의 server_exe 로 덮어쓴다.
-    "/opt/homebrew/bin/llama-server".to_string()
+    installed_or(exe_dir().as_deref(), "llama/llama-server", || {
+        "/opt/homebrew/bin/llama-server".to_string()
+    })
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn default_server_exe() -> String {
-    "llama-server".to_string()
+    installed_or(exe_dir().as_deref(), "llama/llama-server", || {
+        "llama-server".to_string()
+    })
 }
 
 /// 추론 디바이스 기본값. Windows=Vulkan0(iGPU 명시), 그 외=빈 값.
@@ -154,6 +233,15 @@ fn default_device() -> String {
 }
 
 fn default_model_path() -> String {
+    // 설치본: exe 옆 models/Qwen3.5-2B-Q4_K_M.gguf. 개발: ~/.lmstudio/...
+    installed_or(
+        exe_dir().as_deref(),
+        "models/Qwen3.5-2B-Q4_K_M.gguf",
+        dev_model_path,
+    )
+}
+
+fn dev_model_path() -> String {
     let home = dirs::home_dir().unwrap_or_default();
     home.join(".lmstudio")
         .join("models")
@@ -229,5 +317,35 @@ mod tests {
             ..AppConfig::default()
         };
         assert_eq!(cfg.workspace_path(), tmp.path());
+    }
+
+    /// 설치 레이아웃: exe 옆 상대경로 파일이 존재하면 그 절대경로를 채택한다.
+    #[test]
+    fn installed_or_prefers_existing_relative_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("llama");
+        std::fs::create_dir_all(&sub).unwrap();
+        let exe = sub.join("llama-server.exe");
+        std::fs::write(&exe, b"x").unwrap();
+
+        let got = installed_or(Some(tmp.path()), "llama/llama-server.exe", || {
+            "DEV".to_string()
+        });
+        assert_eq!(PathBuf::from(got), exe);
+    }
+
+    /// 설치본 파일이 없으면(개발 PC) 개발 기본값으로 폴백한다.
+    #[test]
+    fn installed_or_falls_back_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = installed_or(Some(tmp.path()), "models/none.gguf", || "DEV".to_string());
+        assert_eq!(got, "DEV");
+    }
+
+    /// exe 디렉토리를 알 수 없으면 곧장 폴백한다.
+    #[test]
+    fn installed_or_falls_back_when_no_exe_dir() {
+        let got = installed_or(None, "whatever", || "DEV".to_string());
+        assert_eq!(got, "DEV");
     }
 }
