@@ -260,8 +260,9 @@ Type: filesandordirs; Name: "{app}"
 
 ## 10. 착수 순서 (제안 체크리스트)
 
-- [ ] `config.rs` 기본 경로를 exe-상대 설치 레이아웃 우선으로 (§5.1) — **가장 먼저, 단독으로 검증 가능**
-      (설치본처럼 폴더 구성 후 앱 실행 → 사이드카·모델 다 찾는지 확인)
+- [x] `config.rs` 기본 경로를 exe-상대 설치 레이아웃 우선으로 (§5.1) — **완료** (커밋 9f160fc)
+      `resolve_installed`/`installed` 헬퍼 + 각 default_* 에 설치본 우선·개발 폴백. TDD 통과.
+      (남은 검증: 실제 설치본처럼 폴더 구성 후 Windows 에서 앱 실행 → 사이드카·모델 탐색 확인)
 - [ ] `tauri.conf.json` `bundle.active=false`(InnoSetup 채택 시)
 - [ ] `installer/` 디렉토리 + `local-agent.iss` 작성 (§6)
 - [ ] payload 수집 스크립트(`installer/collect-payload.ps1`) — 바이너리/모델 모으기
