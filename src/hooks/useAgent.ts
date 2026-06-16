@@ -8,7 +8,9 @@ import type {
   AssistantMessage,
   ChatMessage,
   ServerStatus,
+  LocalsearchStatus,
   UiMessage,
+  WorkspaceSummary,
 } from "../types";
 
 /**
@@ -19,9 +21,15 @@ export function useAgent() {
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [server, setServer] = useState<ServerStatus>({ status: "loading", detail: "" });
+  const [localsearch, setLocalsearch] = useState<LocalsearchStatus>({ status: "disabled", detail: "" });
   // 살아있는 설정(워크스페이스/페르소나) — 설정 패널이든 에이전트 도구든
   // 어디서 바뀌어도 config-changed 이벤트로 즉시 갱신된다
   const [config, setConfig] = useState<AppConfig | null>(null);
+  // 빈 화면 디스커버빌리티 — 현재 워크스페이스 요약(타입별 개수 + 결정적 제안)
+  const [summary, setSummary] = useState<WorkspaceSummary | null>(null);
+  const refreshSummary = useCallback(() => {
+    invoke<WorkspaceSummary>("workspace_summary").then(setSummary).catch(() => {});
+  }, []);
   // ref: 이벤트 필터링용(리스너 클로저에서 최신값 필요) / state: UI 표시용(대화 목록 강조)
   const sessionRef = useRef<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -41,8 +49,13 @@ export function useAgent() {
         setServer({ status: ev.status, detail: ev.detail });
         return;
       }
+      if (ev.type === "localsearch-status") {
+        setLocalsearch({ status: ev.status, detail: ev.detail });
+        return;
+      }
       if (ev.type === "config-changed") {
         setConfig(ev.config);
+        invoke<WorkspaceSummary>("workspace_summary").then(setSummary).catch(() => {});
         return;
       }
       if (sessionRef.current && "session_id" in ev && ev.session_id !== sessionRef.current) return;
@@ -99,6 +112,9 @@ export function useAgent() {
             segments: [...m.segments, { kind: "error", message: ev.message }],
           }));
           break;
+        case "sources":
+          patchAssistant((m) => ({ ...m, sources: ev.sources }));
+          break;
         case "turn-end":
           patchAssistant((m) => ({
             ...m,
@@ -114,10 +130,17 @@ export function useAgent() {
     };
   }, [patchAssistant]);
 
-  // 초기 설정 로드 (이후 변경은 config-changed 이벤트가 밀어준다)
+  // 초기 설정 + 워크스페이스 요약 로드 (이후 변경은 config-changed 가 갱신)
   useEffect(() => {
     invoke<AppConfig>("get_config").then(setConfig).catch(() => {});
-  }, []);
+    refreshSummary();
+    // 인덱싱 배너 레이스 보정: 마운트 시 현재 로컬 검색 상태를 조회 (이후는 이벤트가 갱신)
+    invoke<[string, string]>("get_localsearch_status")
+      .then(([status, detail]) =>
+        setLocalsearch({ status: status as LocalsearchStatus["status"], detail }),
+      )
+      .catch(() => {});
+  }, [refreshSummary]);
 
   // ready 이벤트가 리스너 등록 전에 발행되는 레이스 보정: ready 가 아닐 동안 상태 폴링
   useEffect(() => {
@@ -146,12 +169,20 @@ export function useAgent() {
   }, []);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, attachments: { path: string; thumb: string }[] = []) => {
       const sessionId = await ensureSession();
-      setMessages((prev) => [...prev, { role: "user", text }, { role: "assistant", segments: [] }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", text, images: attachments.length ? attachments : undefined },
+        { role: "assistant", segments: [] },
+      ]);
       setBusy(true);
       try {
-        await invoke("send_message", { sessionId, text });
+        await invoke("send_message", {
+          sessionId,
+          text,
+          attachments: attachments.map((a) => a.path),
+        });
       } catch (e) {
         patchAssistant((m) => ({
           ...m,
@@ -176,7 +207,8 @@ export function useAgent() {
     setSessionId(null);
     setMessages([]);
     setBusy(false);
-  }, []);
+    refreshSummary();
+  }, [refreshSummary]);
 
   /** 저장된 세션을 불러와 화면을 복원하고, 이어서 대화할 수 있게 한다 */
   const loadSession = useCallback(async (id: string) => {
@@ -187,5 +219,5 @@ export function useAgent() {
     setBusy(false);
   }, []);
 
-  return { messages, busy, server, config, send, cancel, newChat, loadSession, sessionId };
+  return { messages, busy, server, localsearch, config, summary, send, cancel, newChat, loadSession, sessionId };
 }

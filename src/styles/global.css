@@ -209,7 +209,8 @@ body::before {
 
 /* 빈 상태 */
 .empty-state {
-  margin: auto;
+  align-self: center;
+  margin-top: 32px;
   text-align: center;
   display: flex;
   flex-direction: column;
@@ -290,6 +291,69 @@ body::before {
   font-size: 11px;
   color: var(--ink-faint);
   padding-left: 2px;
+}
+
+.intro-bubble {
+  align-self: flex-start;
+  max-width: 80%;
+  text-align: left;
+  align-items: flex-start;
+  margin-top: 4px;
+}
+.intro-bubble .suggestion {
+  align-self: flex-start;
+}
+
+/* ── 로컬 검색 인덱싱 배너 ──────────────────────────────── */
+.ls-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  background: var(--amber-soft, rgba(180, 140, 40, 0.12));
+  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+}
+.ls-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--ink-faint);
+  border-top-color: transparent;
+  animation: ls-spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes ls-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── RAG 출처 (말풍선 하단) ─────────────────────────────── */
+.msg-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+.msg-sources-label {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.source-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  background: var(--amber-soft, rgba(180, 140, 40, 0.12));
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+  border-radius: 999px;
+  padding: 1px 9px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── thinking 블록 ──────────────────────────────────────── */
@@ -596,6 +660,108 @@ body::before {
   font-size: 11px;
   font-family: var(--mono);
   color: var(--ink-faint);
+}
+
+/* ── 스크린샷 캡처 버튼 / 첨부 ─────────────────────────── */
+/* 고스트 버튼: 평소엔 옅은 잉크, hover 에 amber — 앱의 다크/amber 톤에 맞춘 미니멀 스타일 */
+.capture-btn {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  border: none;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, transform 0.12s;
+}
+.capture-btn svg {
+  display: block;
+}
+.capture-btn:hover:not(:disabled) {
+  color: var(--amber);
+  background: var(--bg-overlay);
+  transform: translateY(-1px);
+}
+.capture-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.capture-btn.busy svg {
+  animation: capture-pulse 1s ease-in-out infinite;
+}
+@keyframes capture-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.composer-attachments {
+  pointer-events: auto;
+  max-width: 780px;
+  margin: 0 auto 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.attach-chip {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--bg-overlay);
+}
+.attach-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.capture-error {
+  pointer-events: auto;
+  max-width: 780px;
+  margin: 0 auto 8px;
+  font-size: 12px;
+  color: var(--red);
+}
+/* user 말풍선 안 썸네일 */
+.msg-user-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.msg-thumb {
+  max-width: 220px;
+  max-height: 220px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  display: block;
+}
+.msg-thumb-ph {
+  font-size: 12px;
+  color: var(--ink-faint);
+  padding: 6px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
 }
 
 /* ── 설정 패널 ─────────────────────────────────────────── */

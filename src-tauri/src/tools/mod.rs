@@ -128,6 +128,27 @@ impl ToolRegistry {
         )
     }
 
+    /// `allowed` 화이트리스트에 든 도구만(그중 `excluded` 는 제외) 직렬화한다.
+    /// B 백스톱: RAG 턴에 조회(읽기) 도구만 남겨, 게이트 오판 시 모델이 회복하게 한다.
+    pub fn schemas_only(&self, allowed: &[&str], excluded: &[&str]) -> Value {
+        Value::Array(
+            self.tools
+                .iter()
+                .filter(|t| allowed.contains(&t.name()) && !excluded.contains(&t.name()))
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name(),
+                            "description": t.description(),
+                            "parameters": t.parameters(),
+                        }
+                    })
+                })
+                .collect(),
+        )
+    }
+
     pub fn execute(&self, name: &str, args: &Value, ctx: &ToolCtx) -> Result<String> {
         match self.tools.iter().find(|t| t.name() == name) {
             Some(tool) => tool.execute(args, ctx),
@@ -272,6 +293,27 @@ pub(crate) fn not_found_hint(requested: &str, ws: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B 백스톱: RAG 턴에 조회 도구만 노출할 때 쓰는 화이트리스트 직렬화.
+    /// allowed 에 든 것만, 그중 excluded 는 빼고, 등록 순서를 유지한다.
+    #[test]
+    fn schemas_only_exposes_allowed_minus_excluded() {
+        let reg = ToolRegistry::with_default_tools();
+        let v = reg.schemas_only(
+            &["list_dir", "read_file", "search_files"],
+            &["search_files"],
+        );
+        let names: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["list_dir", "read_file"]);
+        // 쓰기성 도구는 화이트리스트에 없으니 절대 노출되면 안 된다
+        assert!(!names.contains(&"write_file".to_string()));
+        assert!(!names.contains(&"delete_path".to_string()));
+    }
 
     /// 주변에서 못 찾은 "파일 없음"은 막다른 골목이 아니라 사용자 질문으로 이어져야 한다.
     /// 2B 는 프롬프트 규칙보다 직전 도구 결과의 지시를 더 잘 따른다 (2026-06-12).

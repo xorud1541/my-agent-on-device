@@ -2,13 +2,16 @@ pub mod agent;
 mod commands;
 pub mod config;
 pub mod llm;
+pub mod localsearch;
 pub mod logging;
 pub mod models;
 pub mod sessions;
 pub mod tools;
+pub mod workspace_summary;
 
 use config::AppConfig;
 use llm::server::LlamaServer;
+use localsearch::{LocalSearchServer, SearchClient};
 use models::ChatMessage;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -20,6 +23,13 @@ pub struct AppState {
     /// Arc — 도구 실행 컨텍스트(ToolCtx)와 살아있는 설정을 공유한다
     pub config: Arc<Mutex<AppConfig>>,
     pub server: tokio::sync::Mutex<LlamaServer>,
+    /// 로컬 검색 사이드카(localsearch-cli serve) 관리자
+    pub localsearch: tokio::sync::Mutex<LocalSearchServer>,
+    /// 사이드카가 준비되면 채워지는 검색 클라이언트 (RAG 프리훅이 사용). None = 비활성
+    pub search: tokio::sync::Mutex<Option<SearchClient>>,
+    /// 로컬 검색 인덱싱/사이드카 상태 (status, detail). 콜드 스타트 시 프론트가 마운트 후
+    /// 조회해 인덱싱 배너 레이스를 피한다.
+    pub localsearch_status: Mutex<(String, String)>,
     pub sessions: Mutex<HashMap<String, Vec<ChatMessage>>>,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub registry: Arc<ToolRegistry>,
@@ -31,6 +41,9 @@ pub fn run() {
         .manage(AppState {
             config: Arc::new(Mutex::new(AppConfig::load())),
             server: tokio::sync::Mutex::new(LlamaServer::new()),
+            localsearch: tokio::sync::Mutex::new(LocalSearchServer::new()),
+            search: tokio::sync::Mutex::new(None),
+            localsearch_status: Mutex::new(("disabled".into(), String::new())),
             sessions: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             registry: Arc::new(ToolRegistry::with_default_tools()),
@@ -41,6 +54,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let _ = commands::start_server_inner(&handle).await;
             });
+            // 로컬 검색 사이드카도 함께 기동 (미구성/바이너리 없음이면 조용히 건너뜀)
+            let ls_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::start_localsearch_inner(&ls_handle).await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,14 +66,17 @@ pub fn run() {
             commands::set_config,
             commands::list_models,
             commands::server_status,
+            commands::get_localsearch_status,
             commands::restart_server,
             commands::new_session,
             commands::send_message,
+            commands::capture_region,
             commands::cancel_turn,
             commands::pick_folder,
             commands::list_sessions,
             commands::load_session,
             commands::delete_session,
+            commands::workspace_summary,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -65,6 +86,9 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 if let Ok(mut server) = state.server.try_lock() {
                     tauri::async_runtime::block_on(server.stop());
+                };
+                if let Ok(mut ls) = state.localsearch.try_lock() {
+                    tauri::async_runtime::block_on(ls.stop());
                 };
             }
         });

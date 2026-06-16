@@ -46,7 +46,12 @@ pub fn system_prompt(cfg: &AppConfig) -> String {
             나온 새 경로를 쓴다. 이전 도구 호출을 그대로 복사하지 말고, 경로가 불확실하면 list_dir 로 먼저 확인한다.\n\
          13. 워크스페이스에서 파일을 못 찾으면 다른 폴더를 임의로 검색하지 말고 사용자에게 위치를 묻는다.\n\
          14. 작업 완료는 해당 도구의 성공 결과를 받았을 때만 말한다. 이름변경은 rename_file 의\n\
-            '이름 변경 완료' 결과가 근거다. 파일에 목록을 적는 것(write_file)은 이름변경이 아니다.\n\n\
+            '이름 변경 완료' 결과가 근거다. 파일에 목록을 적는 것(write_file)은 이름변경이 아니다.\n\
+         15. 사용자 메시지에 '[첨부 이미지: 경로]' 가 있으면 그 경로가 작업 대상 이미지다.\n\
+            설명/판독 요청('설명해줘', '뭐라고 적혀있어')은 도구 없이 직접 본 대로 한국어로 답하고,\n\
+            배경제거·변환·저장 요청은 그 경로를 인자로 해당 도구를 호출한다.\n\
+         16. 도구로 할 수 없는 작업(웹 검색·다운로드, 이메일 발송, 스캔본 OCR, 이미지 생성,\n\
+            다른 앱 제어)은 솔직하게 못 한다고 말하고, 가능한 가장 가까운 대안을 한 가지 제안한다.\n\n\
          {persona}",
         persona = persona_section(cfg)
     )
@@ -140,6 +145,32 @@ pub fn tools_to_exclude(user_text: &str) -> Vec<&'static str> {
     out
 }
 
+/// 이미지를 첨부하고 그 "내용"을 묻는 턴에서, 비전으로 직접 답하도록 숨길 파일조작 도구들.
+/// 비전이 꺼진 모델에는 이미지 픽셀이 전송되지 않으므로 적용하지 않는다(빈손으로 환각 방지).
+/// 첨부가 없거나 내용 질문이 아니면 빈 슬라이스 — 정상 파일 작업 턴은 건드리지 않는다.
+/// (2026-06-15 실로그 turn4~6: "뭐라고 적혀있지/내용 알려줘/분석해봐" → images_to_pdf,
+///  read_file, image_info 로 새고 파일명·해상도만 답. 경쟁 도구를 치워 비전 답을 강제.)
+fn image_content_exclusions(
+    user_text: &str,
+    has_image: bool,
+    vision_enabled: bool,
+) -> &'static [&'static str] {
+    const CONTENT_HINTS: &[&str] = &[
+        "뭐라고", "뭐라", "적혀", "적힌", "내용", "분석", "설명", "뭐가", "뭐야",
+        "무슨", "무엇", "보여", "보이", "읽어", "읽고", "알려", "해석", "글자", "텍스트",
+    ];
+    const HIDE: &[&str] = &[
+        "images_to_pdf", "read_file", "image_info", "zip_create", "zip_extract",
+        "image_transform", "remove_background", "pdf_extract_text", "search_files",
+        "list_dir", "write_file",
+    ];
+    if has_image && vision_enabled && CONTENT_HINTS.iter().any(|h| user_text.contains(h)) {
+        HIDE
+    } else {
+        &[]
+    }
+}
+
 /// "압축 풀어/해제" 류의 압축 해제 의도인가?
 fn is_extract_intent(user_text: &str) -> bool {
     user_text.contains("압축") && (user_text.contains("풀") || user_text.contains("해제"))
@@ -149,6 +180,85 @@ fn is_extract_intent(user_text: &str) -> bool {
 /// "압축파일 안에 뭐 있어?" 같은 내용 조회는 동사가 없어 매칭되지 않는다 — list_only 보존)
 fn is_compress_intent(user_text: &str) -> bool {
     user_text.contains("압축해") || user_text.contains("압축하")
+}
+
+/// 발화에 "도구로 처리해야 하는" 구조적 의도가 있는가.
+/// RAG 게이트가 코사인과 무관하게 이걸 보고 도구 경로로 보낸다 — 색인 문서가
+/// 파일작업을 '내용으로' 서술해(예: QA플랜의 "jpg 90도 회전") 코사인만으론
+/// "작업해줘"와 "설명해줘"를 구분 못 하기 때문(2026-06-15 실측: 두 군집 0.59~0.64 포개짐).
+/// 신호는 토픽 명사가 아니라 ① 파일명.확장자 ② 상태조회 ③ 파일조작 명령동사.
+pub fn tool_intent(user_text: &str) -> bool {
+    has_filename_with_ext(user_text)
+        || is_filesystem_state_query(user_text)
+        || is_compress_intent(user_text)
+        || is_extract_intent(user_text)
+        || is_file_op_command(user_text)
+}
+
+/// "x.png/보고서.pdf" 처럼 확장자 붙은 파일명이 있는가 (도구 대상 지목).
+/// "." 앞에 글자가 붙어야 파일명으로 본다("2분기. 계획" 같은 문장부호는 제외).
+fn has_filename_with_ext(user_text: &str) -> bool {
+    const EXTS: &[&str] = &[
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf", ".zip", ".txt", ".md", ".csv",
+    ];
+    let lower = user_text.to_lowercase();
+    EXTS.iter().any(|e| {
+        lower
+            .match_indices(e)
+            .any(|(i, _)| i > 0 && lower.as_bytes()[i - 1].is_ascii_alphanumeric())
+    })
+}
+
+/// 파일시스템 상태 조회인가 (→ list_dir). **합성 조건**으로 판별한다:
+/// 파일류 명사(압축파일/zip/이미지/폴더/파일…)가 의도를 파일시스템에 묶고,
+/// 조회 술어(있는가/뭐/목록/알려줘/보여줘…)가 "조회"임을 확정한다.
+/// 둘 다 있어야 한다 — "단축키 알려줘"(파일명사X)·"기능 있나요?"(파일명사X)는 문서질문이고,
+/// "매뉴얼 요약해줘"(술어X)도 문서질문이다. "계획이 뭐야?"의 "뭐야"는 술어에 넣지 않는다.
+fn is_filesystem_state_query(user_text: &str) -> bool {
+    const FILE_NOUNS: &[&str] = &[
+        "압축파일", "압축 파일", "zip", "이미지", "사진", "그림", "pdf", "문서들", "폴더",
+        "디렉토리", "파일",
+    ];
+    const LIST_PREDICATES: &[&str] = &[
+        "있는가", "있나", "있어", "있니", "있을까", "있는지", "있지", "뭐있", "뭐 있",
+        "뭐가 있", "무엇이 있", "몇 개", "몇개", "목록", "리스트", "알려줘", "알려 줘",
+        "보여줘", "보여 줘",
+    ];
+    let has_noun = FILE_NOUNS.iter().any(|n| user_text.contains(n));
+    let has_pred = LIST_PREDICATES.iter().any(|p| user_text.contains(p));
+    has_noun && has_pred
+}
+
+/// 파일을 직접 조작하는 명령동사(행동형)인가. 토픽 오발동을 줄이려 "삭제"가 아니라
+/// "삭제해", "회전"이 아니라 "회전해" 처럼 행동 어미를 요구한다.
+fn is_file_op_command(user_text: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "회전해", "돌려", "리사이즈", "크기조절", "크기 조절", "변환해", "변환하", "배경제거",
+        "배경 제거", "누끼", "배경 지워", "모자이크", "삭제해", "지워", "옮겨", "이동해",
+        "이름 바꿔", "이름바꿔", "이름 변경", "이름변경", "rename",
+    ];
+    VERBS.iter().any(|v| user_text.contains(v))
+}
+
+/// B 백스톱에서 RAG 턴에도 노출을 유지할 조회(읽기) 도구. 비파괴·비쓰기만 — 오판한
+/// RAG 턴에서 모델이 파일시스템을 들여다봐 회복할 수 있게 한다.
+const RAG_TURN_READ_TOOLS: &[&str] =
+    &["list_dir", "read_file", "search_files", "image_info", "pdf_extract_text"];
+
+/// B 백스톱 토글(절제실험용). 환경변수 `RAG_KEEP_READ_TOOLS=1`(또는 true)이면 RAG 턴에도
+/// 조회 도구를 남긴다. 기본은 꺼짐(= A 단독, 도구 전면 차단). config 스키마는 건드리지 않는다.
+fn rag_keep_read_tools() -> bool {
+    std::env::var("RAG_KEEP_READ_TOOLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// A 게이트 토글(절제실험용). `RAG_DISABLE_TOOL_INTENT=1`(또는 true)이면 tool_intent 를
+/// 우회해 순수 코사인 게이팅으로 돌린다(= A 끔). 2×2 절제(±A × ±B)에서 -A 셀에 쓴다.
+pub fn tool_intent_disabled() -> bool {
+    std::env::var("RAG_DISABLE_TOOL_INTENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// "지워/삭제" 류의 삭제 의도인가?
@@ -443,6 +553,15 @@ fn close_dangling_tool_calls(messages: &mut Vec<ChatMessage>) {
     }
 }
 
+/// 시스템 메시지(messages[0])에 RAG 근거 블록이 합쳐져 있는가.
+fn rag_active(messages: &[ChatMessage]) -> bool {
+    messages
+        .first()
+        .and_then(|m| m.content.as_deref())
+        .map(|c| c.contains(crate::localsearch::RAG_MARKER))
+        .unwrap_or(false)
+}
+
 /// 사용자 발화 1회를 처리하는 에이전트 루프.
 /// 메시지 히스토리를 직접 갱신하며, 진행 상황을 emit 으로 흘린다.
 pub async fn run_turn(
@@ -458,13 +577,24 @@ pub async fn run_turn(
 ) -> Result<()> {
     let started = Instant::now();
     // 이번 턴 사용자 발화 기준으로 경쟁 도구를 숨긴다 (작은 모델 도구 선택 보정)
-    let user_text = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
+    let last_user = messages.iter().rev().find(|m| m.role == "user");
+    let user_text = last_user
         .and_then(|m| m.content.clone())
         .unwrap_or_default();
-    let excluded = tools_to_exclude(&user_text);
+    let has_user_image = last_user
+        .and_then(|m| m.images.as_ref())
+        .is_some_and(|imgs| !imgs.is_empty());
+    let mut excluded = tools_to_exclude(&user_text);
+    // 이미지를 첨부하고 "내용/분석/뭐라고 적혀있나"를 물으면, 비전으로 직접 답해야 한다.
+    // 그런데 경쟁 도구가 보이면 2B 는 images_to_pdf/read_file/image_info 로 새고 메타데이터만
+    // 답한다 (2026-06-15 실로그 turn4~6). 비전이 켜진 턴에서만 파일조작 도구를 숨겨 답을 강제.
+    for t in image_content_exclusions(&user_text, has_user_image, client.vision_enabled()) {
+        if !excluded.contains(t) {
+            excluded.push(*t);
+        }
+    }
+    // RAG 근거가 들어온 턴이면 정보검색 도구를 숨겨, 주입된 문서로 답하게 한다
+    let rag_on = rag_active(messages);
     // 같은 (도구, 인자) 반복 차단 — 작은 모델의 루프 + 컨텍스트 낭비 방지
     let mut executed: std::collections::HashSet<(String, String)> = Default::default();
     // 중복 호출이 거절된 도구 — 다음 라운드부터 스키마에서 숨긴다. 2B 는 보이는 도구를
@@ -487,7 +617,22 @@ pub async fn run_turn(
             break;
         }
         // 라운드마다 재구성: 발화 기반 제외 + 이번 턴에서 루프가 감지된 도구
-        let tools = {
+        let tools = if rag_on {
+            // RAG 근거가 들어온 턴은 기본적으로 도구를 제공하지 않는다 — 2B 가 내용 질문에도
+            // 도구로 빠지는 것을 차단하고 주입된 [참고 문서]로만 답하게 한다.
+            // (2026-06-14 실로그: 검색도구만 숨기니 images_to_pdf 를 엉뚱하게 호출)
+            //
+            // B 백스톱(RAG_KEEP_READ_TOOLS): 켜지면 조회(읽기) 도구만 남긴다. 게이트가
+            // 오판해 RAG 가 잘못 켜져도 모델이 list_dir/read_file 로 회복할 수 있게 —
+            // 쓰기성 도구는 계속 숨겨 "내용 질문에 쓰기 도구로 새는" 문제는 막는다.
+            if rag_keep_read_tools() {
+                let mut hidden = excluded.clone();
+                hidden.extend(looping_tools.iter().map(String::as_str));
+                registry.schemas_only(RAG_TURN_READ_TOOLS, &hidden)
+            } else {
+                Value::Array(Vec::new())
+            }
+        } else {
             let mut hidden = excluded.clone();
             hidden.extend(looping_tools.iter().map(String::as_str));
             registry.schemas_excluding(&hidden)
@@ -620,6 +765,7 @@ pub async fn run_turn(
                 // 발화/경로 기반 인자 보정 — 2B 의 알려진 실수를 실행 직전에 흡수
                 absorb_relative_path_args(&mut args, &tool_ctx.workspace());
                 fix_resize_axis(&user_text, &call.function.name, &mut args);
+                coerce_extension_zip(&user_text, &call.function.name, &mut args, &tool_ctx.workspace());
                 inject_named_output(&user_text, &call.function.name, &mut args);
                 // 도구는 동기 구현 — 블로킹 실행을 런타임에 알린다
                 let output = tokio::task::block_in_place(|| {
@@ -811,6 +957,86 @@ fn fix_resize_axis(user_text: &str, tool: &str, args: &mut Value) {
 /// 사용자가 출력 파일명(".pdf"/".zip" 토큰)을 말했는데 모델이 output_path 를 생략한
 /// 경우 그 이름을 주입한다 (2026-06-12 R7 실측: "album.pdf로 만들어줘" → output_path
 /// 생략 → 자동 이름 images.pdf 저장 후 "album.pdf로 저장했다"고 거짓 보고).
+/// "현재 워크스페이스의 png 확장자만 압축" 류 — 2B 가 확장자 필터·범위를 못 지켜
+/// 하위 폴더의 잡다한 파일(jpg·확장자 없음)을 섞어 압축하는 실수를 결정적으로 바로잡는다.
+/// (2026-06-15 실로그 turn1~3: "png 확장자만 a.zip" → all_images 폴더의 혼합 6개 파일 압축)
+/// 트리거: zip_create + 압축 의도 + 확장자 필터 마커("만"/"확장") + 알려진 확장자 토큰.
+/// 동작: 워크스페이스 루트(하위 미포함)에서 그 확장자 파일만 모아 paths 를 교체한다.
+/// 보존 가드: ① 특정 파일을 지목하면("dog.png만") 손대지 않고 ② 발화가 실재하는 하위
+/// 폴더명을 담으면 폴더 단위 압축 의도로 보고 손대지 않는다.
+fn coerce_extension_zip(user_text: &str, tool: &str, args: &mut Value, ws: &std::path::Path) {
+    if tool != "zip_create" || !is_compress_intent(user_text) {
+        return;
+    }
+    // 확장자 필터 마커가 없으면(그냥 "이미지 압축") 모델 선택을 보존한다
+    if !user_text.contains("확장") && !user_text.contains("만") {
+        return;
+    }
+    let exts = wanted_extensions(user_text);
+    if exts.is_empty() {
+        return;
+    }
+    // "dog.png만 압축" 처럼 구체 파일명을 지목한 발화는 확장자 필터가 아니다
+    if exts.iter().any(|e| filename_with_ext(user_text, e).is_some()) {
+        return;
+    }
+    let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(ws) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+    // 발화가 실재 하위 폴더를 지목하면 루트 스캔으로 가로채지 않는다
+    let names_subdir = entries.iter().any(|e| {
+        e.path().is_dir()
+            && e.file_name()
+                .to_str()
+                .is_some_and(|n| !n.is_empty() && user_text.contains(n))
+    });
+    if names_subdir {
+        return;
+    }
+    let mut matched: Vec<String> = entries
+        .iter()
+        .filter_map(|e| {
+            let p = e.path();
+            if !p.is_file() {
+                return None;
+            }
+            let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+            exts.contains(&ext)
+                .then(|| p.to_string_lossy().replace('\\', "/"))
+        })
+        .collect();
+    if matched.is_empty() {
+        return;
+    }
+    matched.sort();
+    if let Some(obj) = args.as_object_mut() {
+        obj.insert("paths".into(), Value::String(matched.join(", ")));
+    }
+}
+
+/// 발화에서 압축 대상으로 지정한 확장자들(소문자, 점 없음). 출력 컨테이너 zip 은 제외.
+/// jpg/jpeg 는 한쪽만 말해도 양쪽을 매칭한다 (사용자 표기 흔들림 흡수).
+fn wanted_extensions(user_text: &str) -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        "png", "jpeg", "jpg", "gif", "bmp", "webp", "pdf", "txt", "md", "csv", "svg", "tiff",
+    ];
+    let lower = user_text.to_ascii_lowercase();
+    let mut out: Vec<String> = KNOWN
+        .iter()
+        .filter(|e| lower.contains(*e))
+        .map(|e| e.to_string())
+        .collect();
+    if out.iter().any(|e| e == "jpg" || e == "jpeg") {
+        for j in ["jpg", "jpeg"] {
+            if !out.iter().any(|e| e == j) {
+                out.push(j.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn inject_named_output(user_text: &str, tool: &str, args: &mut Value) {
     let ext = match tool {
         "images_to_pdf" => "pdf",
@@ -818,13 +1044,6 @@ fn inject_named_output(user_text: &str, tool: &str, args: &mut Value) {
         _ => return,
     };
     let Some(obj) = args.as_object_mut() else { return };
-    let has_output = obj
-        .get("output_path")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty());
-    if has_output {
-        return;
-    }
     let Some(name) = filename_with_ext(user_text, ext) else { return };
     // 입력 인자에 이미 등장하는 이름이면 출력 의도가 아니다 (입력 파일명 오인 방지)
     let inputs = format!(
@@ -835,7 +1054,9 @@ fn inject_named_output(user_text: &str, tool: &str, args: &mut Value) {
     if inputs.contains(&name) {
         return;
     }
-    // 이름만 넣는다 — 도구의 absorb_into_workspace 가 워크스페이스 절대경로로 해석
+    // 사용자가 발화에서 명시한 출력 파일명이 최우선이다 — 모델이 다른 이름을 환각해
+    // 채워넣었어도(2026-06-15 실로그 turn1: 사용자 "a.zip" → 모델 output "all_images.zip")
+    // 덮어쓴다. 이름만 넣으면 도구의 absorb_into_workspace 가 워크스페이스 절대경로로 해석.
     obj.insert("output_path".into(), Value::String(name));
 }
 
@@ -992,6 +1213,59 @@ fn compact_old_tool_results(messages: &mut [ChatMessage]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rag_active_detects_marker_in_system_message() {
+        let marker = crate::localsearch::RAG_MARKER;
+        let with = vec![
+            ChatMessage::system(format!("시스템 프롬프트\n\n{marker}\n[#1 문서: a.pdf] 내용")),
+            ChatMessage::user("질문"),
+        ];
+        assert!(rag_active(&with));
+
+        let without = vec![
+            ChatMessage::system("시스템 프롬프트"),
+            ChatMessage::user("질문"),
+        ];
+        assert!(!rag_active(&without));
+    }
+
+    #[test]
+    fn tool_intent_true_for_filesystem_and_tool_questions() {
+        // 측정 실로그(2026-06-15): 코사인이 높아도(0.53~0.64) 이 발화들은 RAG 가 아니라
+        // 도구로 가야 한다 — 도구 의도 구조(상태조회/파일조작 동사/파일명.확장자)가 있다.
+        for q in [
+            "현재 압축파일 뭐있지?",     // 상태 조회 → list_dir
+            "현재 폴더의 파일리스트는?",  // 목록
+            "고양이 사진 압축해줘",       // 압축 도구
+            "dog.png 90도 회전해줘",      // 파일명.확장자 + 회전 동사
+            // 실로그(turn 26·27) 회귀: 파일류 명사 + 조회 술어 합성
+            "현재 폴더에 압축 파일들을 알려줘",  // 압축 파일 + 알려줘
+            "현재 폴더에 압축파일이 있는가?",    // 압축파일 + 있는가
+            "현재폴더에 압축파일이 뭐가 있지?",  // 압축파일 + 뭐가 있
+        ] {
+            assert!(tool_intent(q), "도구 의도로 판별돼야 함: {q:?}");
+        }
+    }
+
+    #[test]
+    fn tool_intent_false_for_document_questions() {
+        // 문서 내용 질문 — RAG 가 발동해야 정상(도구 의도 아님). '폴더' 같은 토픽 명사가
+        // 있어도 내용 동사(요약/설명/궁금)면 도구 의도가 아니다.
+        for q in [
+            "알캡처 기능에 대해 궁금해",
+            "알캡처 매뉴얼 요약해줘",
+            "업무보고서 2분기 계획이 뭐야?",
+            "이 폴더의 알캡처 매뉴얼 요약해줘",
+            "앨리스 사용 시나리오 설명해줘",
+            // 과확장 방지 가드: '알려줘/있나'가 있어도 파일류 명사가 없으면 도구 아님
+            "알캡처 단축키 알려줘",          // 알려줘 + 파일명사 없음(단축키)
+            "스크롤 캡처 기능이 있나요?",     // 있나 + 파일명사 없음(기능)
+        ] {
+            assert!(!tool_intent(q), "문서 질문이라 도구 의도가 아니어야 함: {q:?}");
+        }
+    }
+
     use crate::llm::client::DeltaSink;
     use crate::models::{CompletionResult, FunctionCall, ToolCall};
     use std::sync::Mutex;
@@ -1559,9 +1833,15 @@ mod tests {
         inject_named_output("이미지들 묶어서 album.pdf로 만들어줘", "images_to_pdf", &mut args);
         assert_eq!(args["output_path"], "album.pdf");
 
-        // 모델이 이미 지정했으면 존중
+        // 사용자가 발화에서 출력명을 명시하면 모델이 환각한 출력명을 덮어쓴다
+        // (2026-06-15 실로그 turn1: "a.zip" 요청에 모델이 all_images.zip 을 채워넣음)
         let mut args = serde_json::json!({"dir": "C:/ws", "output_path": "C:/ws/모음.pdf"});
         inject_named_output("이미지들 묶어서 album.pdf로", "images_to_pdf", &mut args);
+        assert_eq!(args["output_path"], "album.pdf");
+
+        // 발화에 출력 파일명 토큰이 없으면 모델 지정을 존중한다
+        let mut args = serde_json::json!({"dir": "C:/ws", "output_path": "C:/ws/모음.pdf"});
+        inject_named_output("이미지들 묶어서 pdf로 만들어줘", "images_to_pdf", &mut args);
         assert_eq!(args["output_path"], "C:/ws/모음.pdf");
 
         // 발화의 .zip 토큰이 입력 인자에 이미 있으면 출력 의도가 아니다
@@ -1573,6 +1853,75 @@ mod tests {
         let mut args = serde_json::json!({"paths": "C:/ws/a.png"});
         inject_named_output("zip으로 압축해줘", "zip_create", &mut args);
         assert!(args.get("output_path").is_none());
+    }
+
+    /// 이미지 첨부 + 내용 질문 + 비전 ON 일 때만 파일조작 도구를 숨긴다 (2026-06-15 turn4~6)
+    #[test]
+    fn image_content_question_hides_file_tools_only_with_vision_and_attachment() {
+        let hide = image_content_exclusions("뭐라고 적혀있지?", true, true);
+        assert!(hide.contains(&"image_info"), "image_info 미숨김");
+        assert!(hide.contains(&"images_to_pdf"), "images_to_pdf 미숨김");
+        assert!(hide.contains(&"read_file"), "read_file 미숨김");
+        assert!(!image_content_exclusions("캡처본 내용을 알려줘", true, true).is_empty());
+        assert!(!image_content_exclusions("이미지 분석 해봐", true, true).is_empty());
+        // 비전 OFF: 픽셀이 전송되지 않으므로 적용하지 않는다 (빈손 환각 방지)
+        assert!(image_content_exclusions("뭐라고 적혀있지?", true, false).is_empty());
+        // 첨부 없음: 적용 안 함
+        assert!(image_content_exclusions("내용 알려줘", false, true).is_empty());
+        // 내용 질문이 아닌 파일 작업: 적용 안 함
+        assert!(image_content_exclusions("이 이미지 배경 제거해줘", true, true).is_empty());
+        assert!(image_content_exclusions("pdf로 만들어줘", true, true).is_empty());
+    }
+
+    /// "워크스페이스의 png 확장자만 압축" — 루트에서 그 확장자만 모은다 (2026-06-15 turn1~3)
+    #[test]
+    fn extension_filter_zip_scans_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("cat.png"), "p").unwrap();
+        std::fs::write(ws.join("dog.png"), "p").unwrap();
+        std::fs::write(ws.join("woman.jpg"), "j").unwrap(); // png 아님 — 제외
+        std::fs::write(ws.join("note.txt"), "t").unwrap(); // 제외
+        std::fs::create_dir(ws.join("all_images")).unwrap();
+        std::fs::write(ws.join("all_images").join("x.png"), "p").unwrap(); // 하위 — 제외
+
+        let mut args = serde_json::json!({"paths": "C:/ws/all_images/woman.jpg"});
+        coerce_extension_zip(
+            "현재 워크스페이스의 png 확장자만 a.zip 으로 압축해줘",
+            "zip_create",
+            &mut args,
+            ws,
+        );
+        let paths = args["paths"].as_str().unwrap();
+        assert!(paths.contains("cat.png"), "{paths}");
+        assert!(paths.contains("dog.png"), "{paths}");
+        assert!(!paths.contains("woman.jpg"), "jpg 섞임: {paths}");
+        assert!(!paths.contains("note.txt"), "txt 섞임: {paths}");
+        assert!(!paths.contains("all_images"), "하위 폴더 포함: {paths}");
+    }
+
+    /// 특정 파일/폴더를 지목하거나 확장자 필터가 아니면 손대지 않는다 (보존 가드)
+    #[test]
+    fn extension_filter_zip_preserves_specific_and_folder_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("cat.png"), "p").unwrap();
+        std::fs::create_dir(ws.join("pngs")).unwrap();
+
+        // 특정 파일 지목 — 루트 전체 png 로 바꾸지 않는다
+        let mut args = serde_json::json!({"paths": "C:/ws/dog.png"});
+        coerce_extension_zip("dog.png만 압축해줘", "zip_create", &mut args, ws);
+        assert_eq!(args["paths"], "C:/ws/dog.png");
+
+        // 실재 하위 폴더명 지목 — 폴더 압축 의도 보존
+        let mut args = serde_json::json!({"paths": "C:/ws/pngs"});
+        coerce_extension_zip("pngs 폴더의 png만 압축해줘", "zip_create", &mut args, ws);
+        assert_eq!(args["paths"], "C:/ws/pngs");
+
+        // 확장자 필터 마커 없음(그냥 이미지 압축) — 모델 선택 보존
+        let mut args = serde_json::json!({"paths": "C:/ws/cat.png"});
+        coerce_extension_zip("이미지들 압축해줘", "zip_create", &mut args, ws);
+        assert_eq!(args["paths"], "C:/ws/cat.png");
     }
 
     #[test]
@@ -1810,6 +2159,14 @@ mod tests {
         assert!(p.contains("옛 경로"), "이동/이름변경 후 옛 경로 무효 규칙 누락");
         assert!(p.contains("그대로 복사하지"), "이전 도구 호출 복제 금지 규칙 누락");
         assert!(p.contains("위치를 묻는다"), "검색 범위 이탈 방지 규칙 누락");
+    }
+
+    /// 범위 밖 요청(웹 검색·이메일·OCR·이미지 생성·앱 제어)은 솔직하게 거절하고
+    /// 가능한 대안을 제안한다는 규칙이 프롬프트에 있어야 한다
+    #[test]
+    fn prompt_has_out_of_scope_honesty_rule() {
+        let p = system_prompt(&AppConfig::default());
+        assert!(p.contains("할 수 없는 작업"), "범위 밖 거절+대안 규칙 누락");
     }
 
     /// 같은 호출이 거절된 도구는 그 턴의 다음 라운드부터 스키마에서 숨긴다.

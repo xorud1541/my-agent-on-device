@@ -6,7 +6,13 @@ export type AgentEvent =
   | { type: "tool-call-end"; session_id: string; call_id: string; name: string; ok: boolean; result: string }
   | { type: "turn-end"; session_id: string; elapsed_ms: number }
   | { type: "error"; session_id: string; message: string }
+  | { type: "sources"; session_id: string; sources: string[] }
   | { type: "server-status"; status: "loading" | "ready" | "down"; detail: string }
+  | {
+      type: "localsearch-status";
+      status: "indexing" | "ready" | "disabled" | "error";
+      detail: string;
+    }
   | { type: "config-changed"; config: AppConfig };
 
 // 어시스턴트 턴은 발생 순서대로 쌓이는 세그먼트의 나열이다
@@ -26,6 +32,8 @@ export type Segment =
 export interface UserMessage {
   role: "user";
   text: string;
+  /** 첨부 이미지(썸네일 data URL + 캐시 경로). 복원 시 thumb 가 빈 문자열이면 플레이스홀더 */
+  images?: { path: string; thumb: string }[];
 }
 
 export interface AssistantMessage {
@@ -33,6 +41,8 @@ export interface AssistantMessage {
   segments: Segment[];
   /** 진행 중이면 undefined, 끝나면 소요 ms */
   elapsedMs?: number;
+  /** RAG 근거로 사용된 출처 문서 파일명 (말풍선 하단 표시) */
+  sources?: string[];
 }
 
 export type UiMessage = UserMessage | AssistantMessage;
@@ -43,6 +53,7 @@ export interface ChatMessage {
   content?: string | null;
   tool_calls?: { id: string; type: string; function: { name: string; arguments: string } }[] | null;
   tool_call_id?: string | null;
+  images?: string[] | null;
 }
 
 // 백엔드 sessions::SessionMeta 와 1:1 대응
@@ -60,6 +71,20 @@ export interface ModelEntry {
   size_bytes: number;
 }
 
+// 백엔드 workspace_summary::WorkspaceSummary 와 1:1 대응
+export interface WorkspaceSummary {
+  workspace_dir: string;
+  folder_name: string;
+  is_default_home: boolean;
+  is_empty: boolean;
+  images: number;
+  pdfs: number;
+  zips: number;
+  others: number;
+  removebg_available: boolean;
+  suggestions: string[];
+}
+
 export interface AppConfig {
   server_exe: string;
   model_path: string;
@@ -75,6 +100,17 @@ export interface AppConfig {
   user_name: string;
   agent_name: string;
   removebg_model: string;
+  mmproj_path: string;
+  localsearch_enabled: boolean;
+  localsearch_bin: string;
+  localsearch_models_dir: string;
+  localsearch_db_dir: string;
+  localsearch_port: number;
+  ort_dylib: string;
 }
 
 export type ServerStatus = { status: "loading" | "ready" | "down"; detail: string };
+export type LocalsearchStatus = {
+  status: "indexing" | "ready" | "disabled" | "error";
+  detail: string;
+};

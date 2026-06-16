@@ -53,7 +53,7 @@ impl Tool for ImageTransform {
         "image_transform"
     }
     fn description(&self) -> &'static str {
-        "이미지를 리사이즈/회전/그레이스케일/포맷변환한다. output_path 를 생략하면 원본 옆에 _edited 로 저장."
+        "이미지를 리사이즈/회전/그레이스케일/포맷변환한다. output_path 생략 시 워크스페이스에 _edited 로 저장(입력이 워크스페이스 밖이어도 결과는 워크스페이스로 저장됨)."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -121,7 +121,8 @@ impl Tool for ImageTransform {
         }
 
         let format = opt_str(args, "format");
-        let out_path = resolve_output_path(path, opt_str(args, "output_path"), format)?;
+        let out_path =
+            resolve_output_path(path, opt_str(args, "output_path"), format, &ctx.workspace())?;
         // 이름만 온 출력 경로는 워크스페이스로 흡수 (2026-06-12 R7 패턴)
         let out_path = crate::tools::workspace::absorb_into_workspace(
             &out_path.to_string_lossy(),
@@ -151,7 +152,12 @@ impl Tool for ImageTransform {
     }
 }
 
-fn resolve_output_path(input: &str, output: Option<&str>, format: Option<&str>) -> Result<PathBuf> {
+fn resolve_output_path(
+    input: &str,
+    output: Option<&str>,
+    format: Option<&str>,
+    ws: &Path,
+) -> Result<PathBuf> {
     if let Some(o) = output {
         return Ok(PathBuf::from(o));
     }
@@ -164,7 +170,12 @@ fn resolve_output_path(input: &str, output: Option<&str>, format: Option<&str>) 
             .map(|e| e.to_string_lossy().into_owned())
             .unwrap_or_else(|| "png".into()),
     };
-    Ok(p.with_file_name(format!("{stem}_edited.{ext}")))
+    // 입력이 워크스페이스 밖(캐시 캡처 등)이면 산출물을 워크스페이스로 떨군다.
+    Ok(crate::tools::workspace::default_output_in_workspace(
+        p,
+        &format!("{stem}_edited.{ext}"),
+        ws,
+    ))
 }
 
 #[cfg(test)]

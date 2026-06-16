@@ -22,6 +22,9 @@ Thumbs.db
 # Claude Code 로컬 세션
 .claude/
 
+# Superpowers 브레인스토밍 비주얼 산출물 (로컬)
+.superpowers/
+
 # Bench artifacts (generated locally, contain local paths)
 bench/dump*.json
 bench/gt_run_*.txt
@@ -29,3 +32,6 @@ bench/gt_run_*.txt
 # 하니스 실행 로그 (진단용 임시 산출물)
 harness_*.log
 adversarial_*.log
+
+# codex 실행 결과 파일
+*.codex-result.md
