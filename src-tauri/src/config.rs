@@ -67,7 +67,7 @@ impl Default for AppConfig {
             agent_name: String::new(),
             removebg_model: default_removebg_model(),
             localsearch_enabled: true,
-            localsearch_bin: String::new(),
+            localsearch_bin: default_localsearch_bin(),
             localsearch_models_dir: default_localsearch_models_dir(),
             localsearch_db_dir: String::new(),
             localsearch_port: 11434,
@@ -76,13 +76,40 @@ impl Default for AppConfig {
     }
 }
 
+/// 단일 인스톨러 동봉 레이아웃 해석: 실행 파일과 같은 폴더 기준 상대경로가 존재하면 절대경로 반환.
+/// (설계: 2026-06-15-packaging-single-installer-design.md §4·§5. 없으면 개발 기본값으로 폴백)
+fn resolve_installed(exe_dir: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    let p = exe_dir.join(rel);
+    p.exists().then_some(p)
+}
+
+/// 실행 파일 옆 동봉 경로(문자열). 없으면 None → 호출부가 개발 기본값으로 폴백.
+fn installed(rel: &str) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    resolve_installed(dir, rel).map(|p| p.to_string_lossy().into_owned())
+}
+
 fn default_localsearch_models_dir() -> String {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".alice")
-        .join("models")
-        .to_string_lossy()
-        .into_owned()
+    // 동봉 시 <install>/models (harrier-v1-270m-onnx 의 부모)
+    installed("models").unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".alice")
+            .join("models")
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// localsearch-cli 기본 경로. 동봉 시 <install>/localsearch/localsearch-cli(.exe), 아니면 빈 값
+/// (빈 값이면 from_app 이 LOCALSEARCH_CLI_BIN 환경변수로 폴백).
+fn default_localsearch_bin() -> String {
+    #[cfg(target_os = "windows")]
+    let rel = "localsearch/localsearch-cli.exe";
+    #[cfg(not(target_os = "windows"))]
+    let rel = "localsearch/localsearch-cli";
+    installed(rel).unwrap_or_default()
 }
 
 /// 사이드카에 넘길 onnxruntime 동적 라이브러리 기본 경로. macOS=Homebrew, 그 외=빈 값(시스템 탐색).
@@ -93,7 +120,8 @@ fn default_ort_dylib() -> String {
 
 #[cfg(not(target_os = "macos"))]
 fn default_ort_dylib() -> String {
-    String::new()
+    // 동봉 시 exe 옆 onnxruntime.dll 을 사이드카에 명시(ORT_DYLIB_PATH). 없으면 빈 값(시스템 탐색).
+    installed("onnxruntime.dll").unwrap_or_default()
 }
 
 fn default_workspace_dir() -> String {
@@ -104,12 +132,14 @@ fn default_workspace_dir() -> String {
 }
 
 fn default_removebg_model() -> String {
-    let home = dirs::home_dir().unwrap_or_default();
-    home.join(".alice")
-        .join("models")
-        .join("removeBG.ort")
-        .to_string_lossy()
-        .into_owned()
+    installed("models/removeBG.ort").unwrap_or_else(|| {
+        let home = dirs::home_dir().unwrap_or_default();
+        home.join(".alice")
+            .join("models")
+            .join("removeBG.ort")
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 /// llama-server 실행 파일 기본 경로. OS별로 분기한다.
@@ -117,12 +147,14 @@ fn default_removebg_model() -> String {
 /// 그 외(Linux 등) = PATH 상의 llama-server.
 #[cfg(target_os = "windows")]
 fn default_server_exe() -> String {
-    let home = dirs::home_dir().unwrap_or_default();
-    home.join("Downloads")
-        .join("llama-b9334-bin-win-vulkan-x64")
-        .join("llama-server.exe")
-        .to_string_lossy()
-        .into_owned()
+    installed("llama/llama-server.exe").unwrap_or_else(|| {
+        let home = dirs::home_dir().unwrap_or_default();
+        home.join("Downloads")
+            .join("llama-b9334-bin-win-vulkan-x64")
+            .join("llama-server.exe")
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -150,14 +182,16 @@ fn default_device() -> String {
 }
 
 fn default_model_path() -> String {
-    let home = dirs::home_dir().unwrap_or_default();
-    home.join(".lmstudio")
-        .join("models")
-        .join("lmstudio-community")
-        .join("Qwen3.5-2B-GGUF")
-        .join("Qwen3.5-2B-Q4_K_M.gguf")
-        .to_string_lossy()
-        .into_owned()
+    installed("models/Qwen3.5-2B-Q4_K_M.gguf").unwrap_or_else(|| {
+        let home = dirs::home_dir().unwrap_or_default();
+        home.join(".lmstudio")
+            .join("models")
+            .join("lmstudio-community")
+            .join("Qwen3.5-2B-GGUF")
+            .join("Qwen3.5-2B-Q4_K_M.gguf")
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 fn config_file() -> PathBuf {
@@ -222,5 +256,18 @@ mod tests {
             ..AppConfig::default()
         };
         assert_eq!(cfg.workspace_path(), tmp.path());
+    }
+
+    #[test]
+    fn resolve_installed_returns_path_only_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 동봉 파일이 없으면 None (→ 개발 기본값 폴백)
+        assert!(resolve_installed(tmp.path(), "llama/llama-server.exe").is_none());
+
+        // exe 옆에 동봉 레이아웃대로 있으면 그 절대경로
+        std::fs::create_dir_all(tmp.path().join("llama")).unwrap();
+        std::fs::write(tmp.path().join("llama/llama-server.exe"), b"x").unwrap();
+        let got = resolve_installed(tmp.path(), "llama/llama-server.exe").unwrap();
+        assert_eq!(got, tmp.path().join("llama/llama-server.exe"));
     }
 }
