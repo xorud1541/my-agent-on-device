@@ -263,11 +263,11 @@ Type: filesandordirs; Name: "{app}"
 - [x] `config.rs` 기본 경로를 exe-상대 설치 레이아웃 우선으로 (§5.1) — **완료** (커밋 9f160fc)
       `resolve_installed`/`installed` 헬퍼 + 각 default_* 에 설치본 우선·개발 폴백. TDD 통과.
       (남은 검증: 실제 설치본처럼 폴더 구성 후 Windows 에서 앱 실행 → 사이드카·모델 탐색 확인)
-- [ ] `tauri.conf.json` `bundle.active=false`(InnoSetup 채택 시)
-- [ ] `installer/` 디렉토리 + `local-agent.iss` 작성 (§6)
-- [ ] payload 수집 스크립트(`installer/collect-payload.ps1`) — 바이너리/모델 모으기
-- [ ] (선택) `[Components]` 로 비전/배경제거/로컬검색 옵션화 (§7)
-- [ ] 빌드 1회 수행 → 깨끗한 Windows VM 에서 설치·실행 검증 (오프라인)
+- [ ] `tauri.conf.json` `bundle.active=false`(InnoSetup 채택 시) — **결정 #6 후**
+- [x] `installer/` 디렉토리 + `local-agent.iss` **초안** 작성 (§6) — 미검증(Windows 필요)
+- [x] payload 수집 스크립트(`installer/collect-payload.ps1`) **초안** — 파라미터화, 미검증
+- [x] `[Components]` 로 비전/배경제거 옵션화 (§7) — `.iss` 에 반영(설치 시 선택)
+- [ ] 빌드 1회 수행 → 깨끗한 Windows VM 에서 설치·실행 검증 (오프라인) — **Windows 머신 필요**
 - [ ] (후속) CI 자동화, 코드사이닝, 배포 호스팅(2GB 분할)
 
 > 참고 레퍼런스: alian `installer/alian.iss`(InnoSetup 디렉티브), `installer/package-deps.ps1`

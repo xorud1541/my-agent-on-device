@@ -29,3 +29,7 @@ bench/gt_run_*.txt
 # 하니스 실행 로그 (진단용 임시 산출물)
 harness_*.log
 adversarial_*.log
+
+# 단일 인스톨러 payload (대용량 모델/바이너리 — 빌드 시 collect-payload.ps1 로 생성)
+installer/payload/
+installer/Output/
